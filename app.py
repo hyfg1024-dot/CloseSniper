@@ -44,7 +44,43 @@ st.markdown(
 }
 html, body, [class*="css"] { font-family:"DM Mono","PingFang SC",monospace; }
 h1,h2,h3 { font-family:"Noto Serif SC","Songti SC",serif !important; letter-spacing:-.035em; }
-[data-testid="stSidebar"] { background:#e7e2d4; border-right:1px solid var(--line); }
+[data-testid="stSidebar"] {
+  background:#e7e2d4;
+  border-right:1px solid var(--line);
+  color:var(--ink);
+}
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] small,
+[data-testid="stSidebar"] summary {
+  color:var(--ink) !important;
+  -webkit-text-fill-color:var(--ink);
+}
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
+  color:#596159 !important;
+  -webkit-text-fill-color:#596159;
+}
+[data-testid="stSidebar"] [data-baseweb="input"] {
+  background:#fbfaf5 !important;
+  border:1px solid #aaa597;
+}
+[data-testid="stSidebar"] input {
+  color:var(--ink) !important;
+  -webkit-text-fill-color:var(--ink) !important;
+}
+[data-testid="stSidebar"] [data-testid="stNumberInput"] button {
+  color:var(--ink) !important;
+  background:transparent !important;
+}
+[data-testid="stSidebar"] [data-testid="stExpander"] {
+  background:rgba(255,255,255,.42);
+}
+[data-testid="stSidebar"] [data-testid="stExpander"] summary {
+  background:#f7f3e9;
+}
 [data-testid="stMetric"] { background:rgba(255,255,255,.43);border:1px solid var(--line);padding:16px;border-radius:2px; }
 .hero { padding:22px 0 30px;border-bottom:2px solid var(--ink);margin-bottom:22px;position:relative; }
 .hero:after { content:"14:30";position:absolute;right:0;top:-24px;font:800 88px/1 "Noto Serif SC";color:rgba(23,33,28,.06); }
