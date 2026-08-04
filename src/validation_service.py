@@ -17,7 +17,14 @@ def validate_pending(
     now = now or datetime.now()
     source = source or AkshareSource()
     pending = store.pending_signals(now.date().isoformat())
-    summary: dict[str, Any] = {"pending": len(pending), "completed": 0, "skipped": 0, "errors": {}}
+    summary: dict[str, Any] = {
+        "pending": len(pending),
+        "completed": 0,
+        "completed_0945": 0,
+        "completed_1030": 0,
+        "skipped": 0,
+        "errors": {},
+    }
     if not pending:
         return summary
 
@@ -34,11 +41,25 @@ def validate_pending(
                 summary["skipped"] += 1
                 continue
             rows = stock_days[validation_date]
-            result = _calculate_window(rows, float(signal["entry_price"]))
+            include_1030 = (
+                validation_date < now.date().isoformat()
+                or now.time() >= time(10, 30)
+            )
+            if signal["price_0945"] is not None and not include_1030:
+                summary["skipped"] += 1
+                continue
+            result = _calculate_windows(
+                rows,
+                float(signal["entry_price"]),
+                include_1030=include_1030,
+            )
             if result is None:
                 summary["skipped"] += 1
                 continue
-            index_result = _calculate_index_window(index_days.get(validation_date))
+            index_result = _calculate_index_windows(
+                index_days.get(validation_date),
+                include_1030=include_1030,
+            )
             store.save_validation(
                 int(signal["signal_id"]),
                 {
@@ -49,6 +70,10 @@ def validate_pending(
                 },
             )
             summary["completed"] += 1
+            if result["price_1030"] is None:
+                summary["completed_0945"] += 1
+            else:
+                summary["completed_1030"] += 1
         except Exception as exc:
             summary["errors"][code] = str(exc)
     return summary
@@ -84,18 +109,23 @@ def _first_day_after(days: dict[str, pd.DataFrame], signal_date: str) -> str | N
     return later[0] if later else None
 
 
-def _calculate_window(rows: pd.DataFrame, entry_price: float) -> dict[str, float] | None:
+def _calculate_windows(
+    rows: pd.DataFrame,
+    entry_price: float,
+    *,
+    include_1030: bool,
+) -> dict[str, float | None] | None:
     if rows.empty or entry_price <= 0:
         return None
-    window = rows[rows["timestamp"].dt.time <= time(9, 45)].copy()
-    if window.empty or window["timestamp"].iloc[-1].time() < time(9, 44):
+    window_0945 = rows[rows["timestamp"].dt.time <= time(9, 45)].copy()
+    if window_0945.empty or window_0945["timestamp"].iloc[-1].time() < time(9, 44):
         return None
-    open_price = float(window.iloc[0]["open"])
-    price_0945 = float(window.iloc[-1]["close"])
-    high_0945 = float(window["high"].max())
-    low_0945 = float(window["low"].min())
+    open_price = float(window_0945.iloc[0]["open"])
+    price_0945 = float(window_0945.iloc[-1]["close"])
+    high_0945 = float(window_0945["high"].max())
+    low_0945 = float(window_0945["low"].min())
     pct = lambda price: (price / entry_price - 1) * 100
-    return {
+    result: dict[str, float | None] = {
         "open_price": open_price,
         "price_0945": price_0945,
         "high_0945": high_0945,
@@ -104,20 +134,61 @@ def _calculate_window(rows: pd.DataFrame, entry_price: float) -> dict[str, float
         "return_0945": pct(price_0945),
         "max_return": pct(high_0945),
         "max_drawdown": pct(low_0945),
+        "price_1030": None,
+        "high_1030": None,
+        "low_1030": None,
+        "return_1030": None,
+        "max_return_1030": None,
+        "max_drawdown_1030": None,
     }
+    if not include_1030:
+        return result
+    window_1030 = rows[rows["timestamp"].dt.time <= time(10, 30)].copy()
+    if window_1030.empty or window_1030["timestamp"].iloc[-1].time() < time(10, 29):
+        return None
+    price_1030 = float(window_1030.iloc[-1]["close"])
+    high_1030 = float(window_1030["high"].max())
+    low_1030 = float(window_1030["low"].min())
+    result.update(
+        {
+            "price_1030": price_1030,
+            "high_1030": high_1030,
+            "low_1030": low_1030,
+            "return_1030": pct(price_1030),
+            "max_return_1030": pct(high_1030),
+            "max_drawdown_1030": pct(low_1030),
+        }
+    )
+    return result
 
 
-def _calculate_index_window(rows: pd.DataFrame | None) -> dict[str, float | None]:
+def _calculate_index_windows(
+    rows: pd.DataFrame | None,
+    *,
+    include_1030: bool,
+) -> dict[str, float | None]:
+    empty_result = {
+        "index_open_return": None,
+        "index_0945_return": None,
+        "index_1030_return": None,
+    }
     if rows is None or rows.empty:
-        return {"index_open_return": None, "index_0945_return": None}
-    window = rows[rows["timestamp"].dt.time <= time(9, 45)].copy()
-    if window.empty:
-        return {"index_open_return": None, "index_0945_return": None}
-    base = float(window.iloc[0]["open"])
+        return empty_result
+    window_0945 = rows[rows["timestamp"].dt.time <= time(9, 45)].copy()
+    if window_0945.empty:
+        return empty_result
+    base = float(window_0945.iloc[0]["open"])
     if base <= 0:
-        return {"index_open_return": None, "index_0945_return": None}
-    return {
+        return empty_result
+    result = {
         "index_open_return": 0.0,
-        "index_0945_return": (float(window.iloc[-1]["close"]) / base - 1) * 100,
+        "index_0945_return": (float(window_0945.iloc[-1]["close"]) / base - 1) * 100,
+        "index_1030_return": None,
     }
-
+    if include_1030:
+        window_1030 = rows[rows["timestamp"].dt.time <= time(10, 30)].copy()
+        if not window_1030.empty and window_1030["timestamp"].iloc[-1].time() >= time(10, 29):
+            result["index_1030_return"] = (
+                float(window_1030.iloc[-1]["close"]) / base - 1
+            ) * 100
+    return result

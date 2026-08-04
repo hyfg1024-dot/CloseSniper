@@ -278,7 +278,7 @@ if not use_demo and time(14, 30) <= scan_now.time() <= time(15, 0):
         candidates=passed.to_dict("records"),
     )
     if frozen:
-        st.success(f"已冻结今日候选 {len(passed)} 只，次一交易日 9:45 自动校验。")
+        st.success(f"已冻结今日候选 {len(passed)} 只，次一交易日 9:45 和 10:30 分阶段校验。")
     else:
         st.caption("今日候选已在首次扫描时冻结，本次刷新不会改写历史记录。")
 elif not use_demo:

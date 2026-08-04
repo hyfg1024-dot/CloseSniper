@@ -64,10 +64,27 @@ class ValidationStore:
                     max_drawdown REAL NOT NULL,
                     index_open_return REAL,
                     index_0945_return REAL,
+                    price_1030 REAL,
+                    high_1030 REAL,
+                    low_1030 REAL,
+                    return_1030 REAL,
+                    max_return_1030 REAL,
+                    max_drawdown_1030 REAL,
+                    index_1030_return REAL,
                     calculated_at TEXT NOT NULL
                 );
                 """
             )
+            existing = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(validations)").fetchall()
+            }
+            for column in (
+                "price_1030", "high_1030", "low_1030", "return_1030",
+                "max_return_1030", "max_drawdown_1030", "index_1030_return",
+            ):
+                if column not in existing:
+                    db.execute(f"ALTER TABLE validations ADD COLUMN {column} REAL")
 
     def freeze_scan(
         self,
@@ -129,11 +146,12 @@ class ValidationStore:
             return db.execute(
                 """
                 SELECT s.id AS signal_id, s.code, s.name, s.entry_price, s.score,
-                       sc.trade_date AS signal_date
+                       sc.trade_date AS signal_date, v.validation_date,
+                       v.price_0945, v.price_1030
                 FROM signals s
                 JOIN scans sc ON sc.id = s.scan_id
                 LEFT JOIN validations v ON v.signal_id = s.id
-                WHERE v.id IS NULL AND sc.trade_date < ?
+                WHERE sc.trade_date < ? AND (v.id IS NULL OR v.price_1030 IS NULL)
                 ORDER BY sc.trade_date, s.score DESC
                 """,
                 (before_date,),
@@ -143,7 +161,9 @@ class ValidationStore:
         columns = [
             "validation_date", "open_price", "price_0945", "high_0945", "low_0945",
             "open_return", "return_0945", "max_return", "max_drawdown",
-            "index_open_return", "index_0945_return", "calculated_at",
+            "index_open_return", "index_0945_return", "price_1030", "high_1030",
+            "low_1030", "return_1030", "max_return_1030", "max_drawdown_1030",
+            "index_1030_return", "calculated_at",
         ]
         with self.connect() as db:
             db.execute(
@@ -160,7 +180,9 @@ class ValidationStore:
             SELECT sc.trade_date AS signal_date, sc.scanned_at, s.code, s.name,
                    s.entry_price, s.score, v.validation_date, v.open_price,
                    v.price_0945, v.open_return, v.return_0945, v.max_return,
-                   v.max_drawdown, v.index_open_return, v.index_0945_return
+                   v.max_drawdown, v.index_open_return, v.index_0945_return,
+                   v.price_1030, v.return_1030, v.max_return_1030,
+                   v.max_drawdown_1030, v.index_1030_return
             FROM signals s
             JOIN scans sc ON sc.id = s.scan_id
             LEFT JOIN validations v ON v.signal_id = s.id
@@ -190,4 +212,3 @@ def _float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
-
