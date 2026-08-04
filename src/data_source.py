@@ -6,6 +6,7 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
+import requests
 
 
 class MarketDataError(RuntimeError):
@@ -14,41 +15,162 @@ class MarketDataError(RuntimeError):
 
 class AkshareSource:
     def __init__(self) -> None:
+        self._disable_system_proxy_for_market_data()
         try:
             import akshare as ak
         except ImportError as exc:
             raise MarketDataError("尚未安装 AKShare，请双击“启动尾盘雷达.command”完成安装") from exc
         self.ak = ak
 
+    @staticmethod
+    def _disable_system_proxy_for_market_data() -> None:
+        """行情站点对部分 macOS 系统代理不兼容，行情请求统一采用直连。"""
+        session_cls = requests.sessions.Session
+        if getattr(session_cls.__init__, "_tail_radar_direct", False):
+            return
+        original_init = session_cls.__init__
+
+        def direct_init(session, *args, **kwargs):
+            original_init(session, *args, **kwargs)
+            session.trust_env = False
+
+        direct_init._tail_radar_direct = True
+        session_cls.__init__ = direct_init
+
     def spot(self) -> pd.DataFrame:
         try:
-            return self.ak.stock_zh_a_spot_em()
-        except Exception as exc:
-            raise MarketDataError(f"免费实时接口暂不可用：{exc}") from exc
+            return self._sina_spot()
+        except Exception as sina_exc:
+            try:
+                frame = self.ak.stock_zh_a_spot_em()
+                frame.attrs["provider"] = "东方财富"
+                return frame
+            except Exception as em_exc:
+                raise MarketDataError(
+                    f"新浪与东方财富实时接口均不可用；新浪：{sina_exc}；东方财富：{em_exc}"
+                ) from em_exc
+
+    @staticmethod
+    def _sina_spot() -> pd.DataFrame:
+        """读取新浪全市场快照，并保留流通市值与换手率。"""
+        count_url = (
+            "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+            "Market_Center.getHQNodeStockCount"
+        )
+        data_url = (
+            "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+            "Market_Center.getHQNodeData"
+        )
+        session = requests.Session()
+        count_response = session.get(count_url, params={"node": "hs_a"}, timeout=12)
+        count_response.raise_for_status()
+        total = int(count_response.json())
+        pages = (total + 99) // 100
+
+        def fetch_page(page: int) -> list[dict]:
+            params = {
+                "page": str(page),
+                "num": "100",
+                "sort": "symbol",
+                "asc": "1",
+                "node": "hs_a",
+                "symbol": "",
+                "_s_r_a": "page",
+            }
+            local_session = requests.Session()
+            response = local_session.get(data_url, params=params, timeout=15)
+            response.raise_for_status()
+            return response.json()
+
+        rows: list[dict] = []
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(fetch_page, page) for page in range(1, pages + 1)]
+            for future in as_completed(futures):
+                rows.extend(future.result())
+        if not rows:
+            raise MarketDataError("新浪实时行情返回空数据")
+
+        raw = pd.DataFrame(rows)
+        number = lambda name: pd.to_numeric(raw[name], errors="coerce")
+        frame = pd.DataFrame(
+            {
+                "代码": raw["code"].astype(str).str.zfill(6),
+                "名称": raw["name"],
+                "最新价": number("trade"),
+                "涨跌幅": number("changepercent"),
+                "量比": np.nan,
+                "换手率": number("turnoverratio"),
+                # 新浪 nmc 单位为万元，统一转换为元。
+                "流通市值": number("nmc") * 10_000,
+                "成交量": number("volume"),
+                "成交额": number("amount"),
+                "最高": number("high"),
+                "最低": number("low"),
+                "今开": number("open"),
+                "昨收": number("settlement"),
+            }
+        )
+        frame.attrs["provider"] = "新浪财经 + 腾讯日线"
+        return frame
 
     def daily(self, code: str) -> pd.DataFrame:
         end = datetime.now().strftime("%Y%m%d")
         start = (datetime.now() - timedelta(days=150)).strftime("%Y%m%d")
-        return self.ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq")
+        symbol = self._market_symbol(code)
+        try:
+            return self.ak.stock_zh_a_hist_tx(
+                symbol=symbol,
+                start_date=start,
+                end_date=end,
+                adjust="qfq",
+                timeout=15,
+            )
+        except Exception:
+            return self.ak.stock_zh_a_hist(
+                symbol=code,
+                period="daily",
+                start_date=start,
+                end_date=end,
+                adjust="qfq",
+            )
 
     def minute(self, code: str) -> pd.DataFrame:
-        day = datetime.now().strftime("%Y-%m-%d")
-        return self.ak.stock_zh_a_hist_min_em(
-            symbol=code,
-            start_date=f"{day} 09:30:00",
-            end_date=f"{day} 15:00:00",
-            period="1",
-            adjust="",
-        )
+        symbol = self._market_symbol(code)
+        try:
+            frame = self.ak.stock_zh_a_minute(symbol=symbol, period="1", adjust="")
+            day = datetime.now().strftime("%Y-%m-%d")
+            return frame[frame["day"].astype(str).str.startswith(day)].copy()
+        except Exception:
+            day = datetime.now().strftime("%Y-%m-%d")
+            return self.ak.stock_zh_a_hist_min_em(
+                symbol=code,
+                start_date=f"{day} 09:30:00",
+                end_date=f"{day} 15:00:00",
+                period="1",
+                adjust="",
+            )
 
     def index_minute(self) -> pd.DataFrame:
-        day = datetime.now().strftime("%Y-%m-%d")
-        return self.ak.index_zh_a_hist_min_em(
-            symbol="000001",
-            period="1",
-            start_date=f"{day} 09:30:00",
-            end_date=f"{day} 15:00:00",
-        )
+        try:
+            frame = self.ak.stock_zh_a_minute(symbol="sh000001", period="1", adjust="")
+            day = datetime.now().strftime("%Y-%m-%d")
+            return frame[frame["day"].astype(str).str.startswith(day)].copy()
+        except Exception:
+            day = datetime.now().strftime("%Y-%m-%d")
+            return self.ak.index_zh_a_hist_min_em(
+                symbol="000001",
+                period="1",
+                start_date=f"{day} 09:30:00",
+                end_date=f"{day} 15:00:00",
+            )
+
+    @staticmethod
+    def _market_symbol(code: str) -> str:
+        if code.startswith(("5", "6", "9")):
+            return f"sh{code}"
+        if code.startswith(("0", "1", "2", "3")):
+            return f"sz{code}"
+        return f"bj{code}"
 
     def hot_concept_members(self, top_n: int = 6) -> dict[str, list[str]]:
         boards = self.ak.stock_board_concept_name_em()

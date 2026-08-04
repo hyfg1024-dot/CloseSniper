@@ -50,6 +50,7 @@ def normalize_spot(raw: pd.DataFrame) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df["code"] = df["code"].astype(str).str.zfill(6)
     df["float_cap_yi"] = df["float_cap"] / 1e8
+    df.attrs.update(raw.attrs)
     return df
 
 
@@ -69,7 +70,6 @@ def hard_filter(spot: pd.DataFrame, cfg: StrategyConfig) -> tuple[pd.DataFrame, 
 
     conditions = [
         ("涨幅 3%–5%", df["change_pct"].between(cfg.min_change, cfg.max_change, inclusive="both")),
-        ("量比 ≥ 1", df["volume_ratio"] >= cfg.min_volume_ratio),
         ("换手率 5%–10%", df["turnover"].between(cfg.min_turnover, cfg.max_turnover, inclusive="both")),
         (
             "流通市值 50–200亿",
@@ -80,17 +80,26 @@ def hard_filter(spot: pd.DataFrame, cfg: StrategyConfig) -> tuple[pd.DataFrame, 
         df = df.loc[mask.reindex(df.index).fillna(False)].copy()
         counts[label] = len(df)
 
+    if df["volume_ratio"].notna().any():
+        df = df.loc[df["volume_ratio"] >= cfg.min_volume_ratio].copy()
+        counts["量比 ≥ 1"] = len(df)
+    else:
+        counts["量比待日线计算"] = len(df)
+
+    safe_ratio = df["volume_ratio"].fillna(1.0)
     df["base_score"] = (
         25
         - (df["change_pct"] - 4).abs() * 4
-        + (df["volume_ratio"].clip(upper=3) - 1) * 5
+        + (safe_ratio.clip(upper=3) - 1) * 5
         + (1 - (df["turnover"] - 7.5).abs() / 2.5).clip(lower=0) * 5
     )
     return df.sort_values("base_score", ascending=False), counts
 
 
 def _numeric_history(raw: pd.DataFrame) -> pd.DataFrame:
-    rename = {"日期": "date", "开盘": "open", "收盘": "close", "最高": "high", "最低": "low", "成交量": "volume"}
+    chinese = {"日期": "date", "开盘": "open", "收盘": "close", "最高": "high", "最低": "low", "成交量": "volume"}
+    english = {"date": "date", "open": "open", "close": "close", "high": "high", "low": "low", "volume": "volume"}
+    rename = chinese if set(chinese).issubset(raw.columns) else english
     if not set(rename).issubset(raw.columns):
         raise ValueError("历史行情字段不完整")
     df = raw.rename(columns=rename)[list(rename.values())].copy()
@@ -136,7 +145,10 @@ def analyze_minute(
     min_vwap_ratio: float = 0.70,
     market_return_pct: float | None = None,
 ) -> dict[str, Any]:
-    rename = {"时间": "time", "收盘": "close", "成交量": "volume", "成交额": "amount"}
+    if {"时间", "收盘", "成交量", "成交额"}.issubset(raw.columns):
+        rename = {"时间": "time", "收盘": "close", "成交量": "volume", "成交额": "amount"}
+    else:
+        rename = {"day": "time", "close": "close", "volume": "volume", "amount": "amount"}
     if not set(rename).issubset(raw.columns):
         return {"minute_ok": False, "vwap_strong": False, "pullback_ok": False, "minute_reason": "分时字段不完整"}
     df = raw.rename(columns=rename)[list(rename.values())].copy()
@@ -179,6 +191,7 @@ def analyze_minute(
 
 def finalize_candidate(row: dict[str, Any]) -> dict[str, Any]:
     checks = {
+        "量比达标": bool(row.get("volume_ratio", 0) >= row.get("min_volume_ratio", 1.0)),
         "量能阶梯": bool(row.get("volume_step")),
         "均线多头": bool(row.get("ma_bull")),
         "分时强势": bool(row.get("vwap_strong")),
@@ -194,6 +207,39 @@ def finalize_candidate(row: dict[str, Any]) -> dict[str, Any]:
     row["checks"] = checks
     row["failed_reasons"] = "、".join(k for k, v in checks.items() if not v) or "无"
     return row
+
+
+def estimate_volume_ratio(
+    current_volume: float,
+    raw_history: pd.DataFrame,
+    now: datetime | None = None,
+) -> float | None:
+    """用今日累计成交量与近5日同期预期成交量估算量比。"""
+    now = now or datetime.now()
+    try:
+        df = _numeric_history(raw_history)
+    except ValueError:
+        return None
+    dates = pd.to_datetime(df["date"], errors="coerce")
+    if len(df) and dates.iloc[-1].date() == now.date():
+        df = df.iloc[:-1]
+    volumes = pd.to_numeric(df["volume"], errors="coerce").dropna().tail(5)
+    if volumes.empty or volumes.mean() <= 0:
+        return None
+
+    t = now.time()
+    if t < time(9, 30):
+        elapsed = 240
+    elif t <= time(11, 30):
+        elapsed = max(1, (now.hour * 60 + now.minute) - (9 * 60 + 30))
+    elif t < time(13, 0):
+        elapsed = 120
+    elif t <= time(15, 0):
+        elapsed = 120 + (now.hour * 60 + now.minute) - 13 * 60
+    else:
+        elapsed = 240
+    expected_so_far = float(volumes.mean()) * min(max(elapsed, 1), 240) / 240
+    return float(current_volume / expected_so_far) if expected_so_far > 0 else None
 
 
 def minute_return_pct(raw: pd.DataFrame) -> float | None:

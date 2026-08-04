@@ -20,6 +20,7 @@ from src.strategy import (
     StrategyConfig,
     analyze_daily,
     analyze_minute,
+    estimate_volume_ratio,
     finalize_candidate,
     hard_filter,
     market_session_status,
@@ -66,7 +67,7 @@ div[data-testid="stExpander"] { border:1px solid var(--line);border-radius:2px;b
 )
 
 
-@st.cache_data(ttl=45, show_spinner=False)
+@st.cache_data(ttl=90, show_spinner=False)
 def load_spot(use_demo: bool) -> pd.DataFrame:
     return demo_spot() if use_demo else AkshareSource().spot()
 
@@ -110,7 +111,7 @@ st.markdown(
   <h1>尾盘雷达</h1>
   <p>把全市场噪声压缩成少数可复核的尾盘候选。硬条件先过筛，再确认量价、均线、分时强度与热点题材。</p>
   <span class="badge live">{status}</span><span class="badge">{datetime.now():%Y-%m-%d %H:%M}</span>
-  <span class="badge">免费行情 · AKShare / 东方财富</span>
+  <span class="badge">免费行情 · 新浪 / 腾讯 / AKShare</span>
 </section>
 """,
     unsafe_allow_html=True,
@@ -135,7 +136,9 @@ try:
         raw_spot = load_spot(use_demo)
         spot = normalize_spot(raw_spot)
         stage1, funnel = hard_filter(spot, cfg)
-        selected = stage1.head(cfg.max_candidates).copy()
+        volume_ratio_missing = not stage1["volume_ratio"].notna().any()
+        analysis_limit = min(len(stage1), max(cfg.max_candidates, 80)) if volume_ratio_missing else cfg.max_candidates
+        selected = stage1.head(analysis_limit).copy()
         progress.write(f"硬条件通过 {len(stage1)} 只；取前 {len(selected)} 只做日线与分时确认")
 
         codes = selected["code"].tolist()
@@ -157,15 +160,24 @@ try:
             except Exception:
                 market_return = None
                 progress.write("大盘分时接口暂不可用，本轮“跑赢大盘”无法确认")
-            try:
-                concept_map = load_hot_concepts()
-            except Exception:
+            if "新浪" in str(raw_spot.attrs.get("provider", "")):
                 concept_map = {}
-                progress.write("热点板块接口暂不可用，本轮不计题材加分")
+                progress.write("当前使用新浪主链路，本轮热点题材暂不计分")
+            else:
+                try:
+                    concept_map = load_hot_concepts()
+                except Exception:
+                    concept_map = {}
+                    progress.write("热点板块接口暂不可用，本轮不计题材加分")
 
         results = []
         for row in selected.to_dict("records"):
             code = row["code"]
+            if pd.isna(row.get("volume_ratio")) and code in daily_map:
+                row["volume_ratio"] = estimate_volume_ratio(row["volume"], daily_map[code])
+            if pd.isna(row.get("volume_ratio")):
+                row["volume_ratio"] = 0.0
+            row["min_volume_ratio"] = cfg.min_volume_ratio
             daily_result = analyze_daily(daily_map[code]) if code in daily_map else {"volume_step": False, "ma_bull": False}
             minute_result = (
                 analyze_minute(minute_map[code], cfg.min_vwap_ratio, market_return)
@@ -253,6 +265,7 @@ with st.expander("规则口径与风控"):
     st.markdown(
         """
 - 阶梯放量：近 5 日成交量回归斜率向上、近 4 日至少两次递增，且最新成交量高于 5 日均量 3%。
+- 量比：新浪快照不提供量比时，用今日累计成交量 ÷ 近 5 日同期预期成交量估算。
 - 均线多头：收盘价 ≥ MA5 > MA10 > MA20 > MA60，且四条均线均较 5 日前上升。
 - 分时强势：至少 70% 的分钟收盘价位于当日成交均价线上方，最新价仍在均价线上方。
 - 跑赢大盘：个股从首个分钟点至最新分钟点的涨幅高于同期上证指数。

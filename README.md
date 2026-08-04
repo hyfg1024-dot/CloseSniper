@@ -58,4 +58,4 @@ python -m unittest discover -s tests
 
 ## 数据源
 
-使用 [AKShare](https://github.com/akfamily/akshare) 聚合的东方财富公开数据，无需 API Key。接口并非交易所授权的专业行情服务，稳定性和时效性不作保证。
+使用 [AKShare](https://github.com/akfamily/akshare) 及公开行情接口，无需 API Key。当前主链路为新浪全市场实时行情、腾讯前复权日线和新浪分钟行情；东方财富作为备用源。量比由今日累计成交量相对近 5 日同期预期成交量计算。接口并非交易所授权的专业行情服务，稳定性和时效性不作保证。

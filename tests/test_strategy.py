@@ -1,7 +1,16 @@
 import unittest
+from datetime import datetime
 
 from src.data_source import demo_daily, demo_index_minute, demo_minute, demo_spot
-from src.strategy import StrategyConfig, analyze_daily, analyze_minute, hard_filter, minute_return_pct, normalize_spot
+from src.strategy import (
+    StrategyConfig,
+    analyze_daily,
+    analyze_minute,
+    estimate_volume_ratio,
+    hard_filter,
+    minute_return_pct,
+    normalize_spot,
+)
 
 
 class StrategyTests(unittest.TestCase):
@@ -26,6 +35,16 @@ class StrategyTests(unittest.TestCase):
         raw.loc[0, "名称"] = "*ST测试"
         result, _ = hard_filter(normalize_spot(raw), StrategyConfig())
         self.assertNotIn("600001", result["code"].tolist())
+
+    def test_estimated_volume_ratio_uses_elapsed_session(self):
+        history = demo_daily("600001")
+        history["成交量"] = 240_000
+        ratio = estimate_volume_ratio(
+            current_volume=150_000,
+            raw_history=history,
+            now=datetime(2026, 8, 4, 12, 0),
+        )
+        self.assertAlmostEqual(ratio, 1.25)
 
 
 if __name__ == "__main__":
