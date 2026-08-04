@@ -188,7 +188,8 @@ try:
             source = AkshareSource()
             daily_map, daily_errors = parallel_fetch(codes, source.daily)
             progress.write(f"日线完成 {len(daily_map)}/{len(codes)}")
-            minute_map, minute_errors = parallel_fetch(codes, source.minute)
+            # 新浪分钟接口内部使用 V8 解码器，macOS 下多线程并发可能触发进程级崩溃。
+            minute_map, minute_errors = parallel_fetch(codes, source.minute, max_workers=1)
             progress.write(f"分时完成 {len(minute_map)}/{len(codes)}")
             errors = {**daily_errors, **minute_errors}
             try:
