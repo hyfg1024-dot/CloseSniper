@@ -256,12 +256,13 @@ except Exception as exc:
 
 if results:
     result_df = pd.DataFrame(results).sort_values(["passed", "score"], ascending=[False, False])
+    result_df["strategy_rank"] = range(1, len(result_df) + 1)
 else:
     result_df = pd.DataFrame(
         columns=[
-            "passed", "status", "code", "name", "score", "change_pct", "volume_ratio",
+            "strategy_rank", "passed", "status", "code", "name", "score", "change_pct", "volume_ratio",
             "turnover", "float_cap_yi", "volume_step", "ma_bull", "vwap_strong",
-            "relative_strong", "pullback_ok", "hot_concepts", "failed_reasons",
+            "relative_strong", "pullback_ok", "hot_concepts", "failed_reasons", "rank_reason",
         ]
     )
 passed = result_df[result_df["passed"] == True]  # noqa: E712
@@ -304,10 +305,10 @@ else:
         st.markdown(
             f"""
 <div class="card candidate">
-  <span class="eyebrow">NO.{rank:02d} · SCORE {row['score']:.0f}</span>
+  <span class="eyebrow">NO.{rank:02d} · 策略匹配 {row['score']:.0f}</span>
   <h3>{row['name']} <span class="muted">{row['code']}</span></h3>
   <b>{row['change_pct']:.2f}%</b> 涨幅　·　量比 {row['volume_ratio']:.2f}　·　换手 {row['turnover']:.2f}%　·　流通 {row['float_cap_yi']:.1f}亿<br>
-  <span class="muted">题材：{concepts}　｜　分时站上均价比例：{row.get('vwap_ratio', 0):.0%}　｜　距尾盘高点：{row.get('pullback_pct', 0):.2f}%</span>
+  <span class="muted">主要优势：{row.get('rank_reason', '—')}　｜　题材：{concepts}　｜　分时站上均价比例：{row.get('vwap_ratio', 0):.0%}　｜　距尾盘高点：{row.get('pullback_pct', 0):.2f}%</span>
 </div>
 """,
             unsafe_allow_html=True,
@@ -318,15 +319,16 @@ display = result_df.copy()
 display["题材"] = display["hot_concepts"].apply(lambda x: " / ".join(x) if isinstance(x, list) and x else "—")
 display = display.rename(
     columns={
-        "status": "结论", "code": "代码", "name": "名称", "score": "评分",
+        "strategy_rank": "策略排名", "status": "结论", "code": "代码", "name": "名称", "score": "匹配度",
         "change_pct": "涨幅%", "volume_ratio": "量比", "turnover": "换手率%",
         "float_cap_yi": "流通市值(亿)", "volume_step": "阶梯放量",
         "ma_bull": "均线多头", "vwap_strong": "分时强势", "pullback_ok": "回踩有效",
         "relative_strong": "跑赢大盘",
         "failed_reasons": "未通过项",
+        "rank_reason": "主要优势",
     }
 )
-cols = ["结论", "代码", "名称", "评分", "涨幅%", "量比", "换手率%", "流通市值(亿)", "阶梯放量", "均线多头", "分时强势", "跑赢大盘", "回踩有效", "题材", "未通过项"]
+cols = ["策略排名", "结论", "代码", "名称", "匹配度", "主要优势", "涨幅%", "量比", "换手率%", "流通市值(亿)", "阶梯放量", "均线多头", "分时强势", "跑赢大盘", "回踩有效", "题材", "未通过项"]
 st.dataframe(display[cols], hide_index=True, width="stretch")
 csv = display[cols].to_csv(index=False).encode("utf-8-sig")
 st.download_button("导出本次结果 CSV", csv, file_name=f"尾盘雷达_{datetime.now():%Y%m%d_%H%M}.csv", mime="text/csv")
@@ -344,7 +346,8 @@ with st.expander("规则口径与风控"):
 - 分时强势：至少 70% 的分钟收盘价位于当日成交均价线上方，最新价仍在均价线上方。
 - 跑赢大盘：个股从首个分钟点至最新分钟点的涨幅高于同期上证指数。
 - 回踩有效：最新价未跌破成交均价，且距离最近 30 分钟高点不超过 1.2%。
-- 热点题材：东方财富概念板块实时涨幅前六，仅作为 8 分加分项，不替代四项技术确认。
+- 热点题材：东方财富概念板块实时涨幅前六，仅作为 10 分加分项，不替代技术确认。
+- 策略排名：先按“候选 / 观察”分组，再按 100 分匹配度降序排列。权重为硬条件贴合 25、量能 15、均线 20、分时 25、热点 10、数据完整性 5。
 
 建议把“次日 9:30 卖出”理解为需要验证的策略规则，而不是收益承诺。实盘应预先规定单笔仓位、最大亏损和异常停牌处理；本工具不连接券商、不自动下单。
 """

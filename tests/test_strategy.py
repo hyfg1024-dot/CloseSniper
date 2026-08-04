@@ -7,6 +7,7 @@ from src.strategy import (
     analyze_daily,
     analyze_minute,
     estimate_volume_ratio,
+    finalize_candidate,
     hard_filter,
     minute_return_pct,
     normalize_spot,
@@ -45,6 +46,57 @@ class StrategyTests(unittest.TestCase):
             now=datetime(2026, 8, 4, 12, 0),
         )
         self.assertAlmostEqual(ratio, 1.25)
+
+    def test_strategy_match_score_ranks_stronger_candidate_first(self):
+        strong = {
+            "change_pct": 4.0,
+            "volume_ratio": 2.0,
+            "turnover": 7.5,
+            "float_cap_yi": 125.0,
+            "volume_step": True,
+            "volume_slope": 0.14,
+            "ma_bull": True,
+            "ma5": 12.0,
+            "ma60": 11.2,
+            "vwap_strong": True,
+            "vwap_ratio": 0.95,
+            "relative_strong": True,
+            "stock_intraday_pct": 3.0,
+            "market_intraday_pct": 0.5,
+            "pullback_ok": True,
+            "pullback_pct": 0.4,
+            "hot_concepts": ["人工智能"],
+            "daily_ok": True,
+            "minute_ok": True,
+            "min_volume_ratio": 1.0,
+        }
+        weaker = {
+            **strong,
+            "change_pct": 3.05,
+            "volume_ratio": 1.05,
+            "turnover": 5.1,
+            "float_cap_yi": 52.0,
+            "volume_slope": 0.01,
+            "ma5": 11.3,
+            "vwap_ratio": 0.71,
+            "stock_intraday_pct": 0.6,
+            "pullback_pct": 1.1,
+            "hot_concepts": [],
+        }
+
+        strong_result = finalize_candidate(strong)
+        weaker_result = finalize_candidate(weaker)
+
+        self.assertTrue(strong_result["passed"])
+        self.assertTrue(weaker_result["passed"])
+        self.assertGreater(strong_result["score"], weaker_result["score"])
+        self.assertLessEqual(strong_result["score"], 100)
+        self.assertAlmostEqual(
+            sum(strong_result["score_breakdown"].values()),
+            strong_result["score"],
+            places=1,
+        )
+        self.assertTrue(strong_result["rank_reason"])
 
 
 if __name__ == "__main__":

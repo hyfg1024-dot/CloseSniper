@@ -199,14 +199,70 @@ def finalize_candidate(row: dict[str, Any]) -> dict[str, Any]:
         "回踩有效": bool(row.get("pullback_ok")),
     }
     hot = bool(row.get("hot_concepts"))
-    score = float(row.get("base_score", 0))
-    score += sum(checks.values()) * 12 + (8 if hot else 0)
+    change = _number(row.get("change_pct"))
+    ratio = _number(row.get("volume_ratio"))
+    turnover = _number(row.get("turnover"))
+    cap = _number(row.get("float_cap_yi"))
+    volume_slope = _number(row.get("volume_slope"))
+    ma5 = _number(row.get("ma5"))
+    ma60 = _number(row.get("ma60"))
+    vwap_ratio = _number(row.get("vwap_ratio"))
+    stock_return = _number(row.get("stock_intraday_pct"))
+    market_return = _number(row.get("market_intraday_pct"))
+    pullback = _number(row.get("pullback_pct"))
+
+    hard_fit = (
+        6 * _clamp(1 - abs(change - 4.0) / 1.0)
+        + 5 * _clamp((ratio - 1.0) / 1.5)
+        + 5 * _clamp(1 - abs(turnover - 7.5) / 2.5)
+        + 4 * _clamp(1 - abs(cap - 125.0) / 75.0)
+        + (5 if checks["量比达标"] else 0)
+    )
+    volume_fit = (8 if checks["量能阶梯"] else 0) + 7 * _clamp(volume_slope / 0.14)
+    ma_spread = (ma5 / ma60 - 1) if ma60 > 0 else 0
+    ma_fit = (12 if checks["均线多头"] else 0) + 8 * _clamp(ma_spread / 0.08)
+    intraday_fit = (
+        10 * _clamp((vwap_ratio - 0.70) / 0.30)
+        + 8 * _clamp((stock_return - market_return) / 2.0)
+        + (7 * _clamp(1 - abs(pullback - 0.4) / 0.8) if checks["回踩有效"] else 0)
+    )
+    theme_fit = 10 if hot else 0
+    data_fit = 5 if row.get("daily_ok") and row.get("minute_ok") else 0
+    breakdown = {
+        "硬条件贴合": round(hard_fit, 1),
+        "量能延续": round(volume_fit, 1),
+        "均线结构": round(ma_fit, 1),
+        "分时强度": round(intraday_fit, 1),
+        "热点题材": round(theme_fit, 1),
+        "数据完整": round(data_fit, 1),
+    }
+    score = sum(breakdown.values())
     row["score"] = min(round(score, 1), 100)
+    row["score_breakdown"] = breakdown
+    component_caps = {"硬条件贴合": 25, "量能延续": 15, "均线结构": 20, "分时强度": 25, "热点题材": 10}
+    strengths = sorted(
+        (label for label in component_caps if breakdown[label] > 0),
+        key=lambda label: breakdown[label] / component_caps[label],
+        reverse=True,
+    )
+    row["rank_reason"] = " · ".join(strengths[:3]) or "暂无明显优势"
     row["passed"] = all(checks.values())
     row["status"] = "候选" if row["passed"] else "观察"
     row["checks"] = checks
     row["failed_reasons"] = "、".join(k for k, v in checks.items() if not v) or "无"
     return row
+
+
+def _number(value: Any) -> float:
+    try:
+        number = float(value)
+        return number if np.isfinite(number) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
+    return min(max(value, lower), upper)
 
 
 def estimate_volume_ratio(
