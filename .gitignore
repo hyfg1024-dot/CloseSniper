@@ -4,4 +4,4 @@ __pycache__/
 *.py[cod]
 .streamlit/secrets.toml
 .pytest_cache/
-
+data/

@@ -135,11 +135,15 @@ class AkshareSource:
             )
 
     def minute(self, code: str) -> pd.DataFrame:
+        frame = self.minute_recent(code)
+        day = datetime.now().strftime("%Y-%m-%d")
+        time_column = "day" if "day" in frame.columns else "时间"
+        return frame[frame[time_column].astype(str).str.startswith(day)].copy()
+
+    def minute_recent(self, code: str) -> pd.DataFrame:
         symbol = self._market_symbol(code)
         try:
-            frame = self.ak.stock_zh_a_minute(symbol=symbol, period="1", adjust="")
-            day = datetime.now().strftime("%Y-%m-%d")
-            return frame[frame["day"].astype(str).str.startswith(day)].copy()
+            return self.ak.stock_zh_a_minute(symbol=symbol, period="1", adjust="")
         except Exception:
             day = datetime.now().strftime("%Y-%m-%d")
             return self.ak.stock_zh_a_hist_min_em(
@@ -151,10 +155,14 @@ class AkshareSource:
             )
 
     def index_minute(self) -> pd.DataFrame:
+        frame = self.index_minute_recent()
+        day = datetime.now().strftime("%Y-%m-%d")
+        time_column = "day" if "day" in frame.columns else "时间"
+        return frame[frame[time_column].astype(str).str.startswith(day)].copy()
+
+    def index_minute_recent(self) -> pd.DataFrame:
         try:
-            frame = self.ak.stock_zh_a_minute(symbol="sh000001", period="1", adjust="")
-            day = datetime.now().strftime("%Y-%m-%d")
-            return frame[frame["day"].astype(str).str.startswith(day)].copy()
+            return self.ak.stock_zh_a_minute(symbol="sh000001", period="1", adjust="")
         except Exception:
             day = datetime.now().strftime("%Y-%m-%d")
             return self.ak.index_zh_a_hist_min_em(

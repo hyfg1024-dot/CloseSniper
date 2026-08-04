@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, time
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -27,6 +27,8 @@ from src.strategy import (
     minute_return_pct,
     normalize_spot,
 )
+from src.validation_store import ValidationStore
+from src.validation_ui import render_history_page, render_validation_page
 
 
 st.set_page_config(page_title="尾盘雷达", page_icon="◉", layout="wide", initial_sidebar_state="expanded")
@@ -91,6 +93,9 @@ h1,h2,h3 { font-family:"Noto Serif SC","Songti SC",serif !important; letter-spac
 .badge.live { color:white;background:var(--moss);border-color:var(--moss); }
 .card { background:rgba(255,255,255,.5);border:1px solid var(--line);padding:18px;margin:8px 0;box-shadow:5px 5px 0 rgba(23,33,28,.08); }
 .candidate { border-left:5px solid var(--signal); }
+.audit-head { border-left:6px solid var(--signal);padding:8px 0 8px 20px;margin:22px 0 26px; }
+.audit-head h2 { font-size:40px;margin:4px 0 8px; }
+.audit-head p { color:#596159;margin:0;max-width:760px; }
 .muted { color:#6f756e;font-size:12px; }
 .stButton>button { border-radius:1px;background:var(--ink);color:var(--paper);border:0;font-weight:600;min-height:44px; }
 .stButton>button:hover { background:var(--signal);color:white; }
@@ -153,6 +158,21 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.caption(status_note)
+
+workspace = st.segmented_control(
+    "工作台",
+    ["今日筛选", "次日校验", "历史表现"],
+    default="今日筛选",
+    label_visibility="collapsed",
+    width="stretch",
+)
+validation_store = ValidationStore()
+if workspace == "次日校验":
+    render_validation_page(validation_store)
+    st.stop()
+if workspace == "历史表现":
+    render_history_page(validation_store)
+    st.stop()
 
 run = st.button("扫描全市场", type="primary", width="stretch")
 if not run:
@@ -245,6 +265,23 @@ else:
         ]
     )
 passed = result_df[result_df["passed"] == True]  # noqa: E712
+
+scan_now = datetime.now()
+if not use_demo and time(14, 30) <= scan_now.time() <= time(15, 0):
+    frozen = validation_store.freeze_scan(
+        scanned_at=scan_now,
+        provider=str(raw_spot.attrs.get("provider", "免费行情")),
+        market_count=funnel["全市场"],
+        hard_count=len(stage1),
+        config=cfg.as_dict(),
+        candidates=passed.to_dict("records"),
+    )
+    if frozen:
+        st.success(f"已冻结今日候选 {len(passed)} 只，次一交易日 9:45 自动校验。")
+    else:
+        st.caption("今日候选已在首次扫描时冻结，本次刷新不会改写历史记录。")
+elif not use_demo:
+    st.caption("当前不在 14:30–15:00 策略窗口，本次结果仅供查看，不写入次日校验档案。")
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("全市场", f"{funnel['全市场']:,}")
