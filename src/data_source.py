@@ -242,7 +242,11 @@ def demo_daily(code: str) -> pd.DataFrame:
     seed = int(code[-3:])
     rng = np.random.default_rng(seed)
     days = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=90)
-    close = 8 + np.cumsum(rng.normal(0.08, 0.06, len(days)))
+    index = max(seed - 1, 0)
+    target = 8 + index * 2.7
+    trend = np.linspace(target * 0.68, target, len(days))
+    close = trend + rng.normal(0, target * 0.0015, len(days))
+    close[-1] = target
     volume = np.linspace(100_000, 360_000, len(days)) * rng.uniform(0.94, 1.06, len(days))
     volume[-5:] = [200_000, 220_000, 250_000, 290_000, 340_000]
     return pd.DataFrame(
@@ -261,7 +265,10 @@ def demo_minute(code: str) -> pd.DataFrame:
     seed = int(code[-3:])
     rng = np.random.default_rng(seed)
     times = pd.date_range(pd.Timestamp.today().normalize() + pd.Timedelta(hours=9, minutes=30), periods=240, freq="min")
-    base = 10 + np.linspace(0, 0.45, len(times)) + rng.normal(0, 0.018, len(times))
+    index = max(seed - 1, 0)
+    target = 8 + index * 2.7
+    base = np.linspace(target * 0.97, target, len(times)) + rng.normal(0, target * 0.0012, len(times))
+    base[-1] = target
     volume = rng.integers(900, 2200, len(times))
     amount = base * volume * 100
     return pd.DataFrame({"时间": times, "收盘": base, "成交量": volume, "成交额": amount})

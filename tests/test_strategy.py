@@ -1,6 +1,9 @@
 import unittest
 from datetime import datetime
 
+import numpy as np
+import pandas as pd
+
 from src.data_source import demo_daily, demo_index_minute, demo_minute, demo_spot
 from src.strategy import (
     StrategyConfig,
@@ -9,6 +12,7 @@ from src.strategy import (
     estimate_volume_ratio,
     finalize_candidate,
     hard_filter,
+    merge_live_daily_bar,
     minute_return_pct,
     normalize_spot,
 )
@@ -46,6 +50,53 @@ class StrategyTests(unittest.TestCase):
             now=datetime(2026, 8, 4, 12, 0),
         )
         self.assertAlmostEqual(ratio, 1.25)
+
+    def test_live_snapshot_is_merged_as_provisional_daily_bar(self):
+        days = pd.bdate_range(end="2026-08-04", periods=70)
+        close = np.linspace(8.0, 10.0, len(days))
+        history = pd.DataFrame(
+            {
+                "date": days,
+                "open": close,
+                "close": close,
+                "high": close,
+                "low": close,
+                "volume": 100_000,
+            }
+        )
+        merged = merge_live_daily_bar(
+            history,
+            {
+                "prev_close": 10.0,
+                "price": 10.4,
+                "open": 10.1,
+                "high": 10.5,
+                "low": 10.0,
+                "volume": 180_000,
+            },
+            now=datetime(2026, 8, 5, 14, 50),
+        )
+        self.assertEqual(str(merged.iloc[-1]["date"])[:10], "2026-08-05")
+        self.assertAlmostEqual(float(merged.iloc[-1]["close"]), 10.4)
+        self.assertEqual(float(merged.iloc[-1]["volume"]), 180_000)
+
+    def test_rational_mode_relaxes_only_long_term_ma_gate(self):
+        close = np.r_[np.linspace(20, 10, 50), np.linspace(9, 15, 20)]
+        history = pd.DataFrame(
+            {
+                "date": pd.bdate_range("2026-01-01", periods=len(close)),
+                "open": close,
+                "close": close,
+                "high": close,
+                "low": close,
+                "volume": np.linspace(100_000, 300_000, len(close)),
+            }
+        )
+        strict = analyze_daily(history, mode="strict")
+        rational = analyze_daily(history, mode="rational")
+        self.assertFalse(strict["ma_bull"])
+        self.assertTrue(rational["ma_bull"])
+        self.assertFalse(rational["ma60_rising"])
 
     def test_strategy_match_score_ranks_stronger_candidate_first(self):
         strong = {

@@ -103,12 +103,50 @@ def _numeric_history(raw: pd.DataFrame) -> pd.DataFrame:
     if not set(rename).issubset(raw.columns):
         raise ValueError("历史行情字段不完整")
     df = raw.rename(columns=rename)[list(rename.values())].copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
     for col in ("open", "close", "high", "low", "volume"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna().sort_values("date")
 
 
-def analyze_daily(raw: pd.DataFrame) -> dict[str, Any]:
+def merge_live_daily_bar(
+    raw: pd.DataFrame,
+    spot_row: dict[str, Any],
+    now: datetime | None = None,
+) -> pd.DataFrame:
+    """将实时快照合成当日临时日K。
+
+    历史日线使用前复权口径时，以昨收与历史末日收盘的比例
+    将实时价折算到同一口径，避免除权日直接拼接造成均线跳变。
+    """
+    now = now or datetime.now()
+    df = _numeric_history(raw)
+    if df.empty:
+        return df
+    dates = pd.to_datetime(df["date"], errors="coerce")
+    today = now.date()
+    has_today = bool(len(dates) and dates.iloc[-1].date() == today)
+    reference_index = -2 if has_today and len(df) >= 2 else -1
+    historical_prev_close = float(df.iloc[reference_index]["close"])
+    spot_prev_close = _number(spot_row.get("prev_close"))
+    scale = historical_prev_close / spot_prev_close if spot_prev_close > 0 else 1.0
+    bar = {
+        "date": pd.Timestamp(today),
+        "open": _number(spot_row.get("open")) * scale,
+        "close": _number(spot_row.get("price")) * scale,
+        "high": _number(spot_row.get("high")) * scale,
+        "low": _number(spot_row.get("low")) * scale,
+        "volume": _number(spot_row.get("volume")),
+    }
+    if has_today:
+        for column, value in bar.items():
+            df.loc[df.index[-1], column] = value
+    else:
+        df = pd.concat([df, pd.DataFrame([bar])], ignore_index=True)
+    return df
+
+
+def analyze_daily(raw: pd.DataFrame, mode: str = "strict") -> dict[str, Any]:
     df = _numeric_history(raw)
     if len(df) < 65:
         return {"daily_ok": False, "volume_step": False, "ma_bull": False, "daily_reason": "日线不足60日"}
@@ -119,8 +157,15 @@ def analyze_daily(raw: pd.DataFrame) -> dict[str, Any]:
     last = df.iloc[-1]
     prev5 = df.iloc[-6]
     ma_order = last["close"] >= last["ma5"] > last["ma10"] > last["ma20"] > last["ma60"]
-    ma_rising = all(last[f"ma{w}"] > prev5[f"ma{w}"] for w in (5, 10, 20, 60))
-    ma_bull = bool(ma_order and ma_rising)
+    rising = {w: bool(last[f"ma{w}"] > prev5[f"ma{w}"]) for w in (5, 10, 20, 60)}
+    ma_rising = all(rising.values())
+    ma_strict = bool(ma_order and ma_rising)
+    ma_rational = bool(
+        last["close"] >= last["ma5"] > last["ma10"] > last["ma20"]
+        and last["close"] > last["ma60"]
+        and all(rising[w] for w in (5, 10, 20))
+    )
+    ma_bull = ma_strict if mode == "strict" else ma_rational
 
     volumes = df["volume"].tail(5).to_numpy(dtype=float)
     transitions = int(np.sum(np.diff(volumes[-4:]) > 0))
@@ -130,13 +175,18 @@ def analyze_daily(raw: pd.DataFrame) -> dict[str, Any]:
         "daily_ok": True,
         "volume_step": volume_step,
         "ma_bull": ma_bull,
+        "ma_strict": ma_strict,
+        "ma_rational": ma_rational,
+        "ma_order": bool(ma_order),
+        "ma_all_rising": bool(ma_rising),
+        "ma60_rising": rising[60],
         "close": float(last["close"]),
         "ma5": float(last["ma5"]),
         "ma10": float(last["ma10"]),
         "ma20": float(last["ma20"]),
         "ma60": float(last["ma60"]),
         "volume_slope": slope / max(float(np.mean(volumes)), 1),
-        "daily_reason": "均线多头且放量" if ma_bull and volume_step else "均线或量能未确认",
+        "daily_reason": "均线结构且放量通过" if ma_bull and volume_step else "均线或量能未确认",
     }
 
 
@@ -193,7 +243,7 @@ def finalize_candidate(row: dict[str, Any]) -> dict[str, Any]:
     checks = {
         "量比达标": bool(row.get("volume_ratio", 0) >= row.get("min_volume_ratio", 1.0)),
         "量能阶梯": bool(row.get("volume_step")),
-        "均线多头": bool(row.get("ma_bull")),
+        "均线结构": bool(row.get("ma_bull")),
         "分时强势": bool(row.get("vwap_strong")),
         "跑赢大盘": bool(row.get("relative_strong")),
         "回踩有效": bool(row.get("pullback_ok")),
@@ -220,7 +270,11 @@ def finalize_candidate(row: dict[str, Any]) -> dict[str, Any]:
     )
     volume_fit = (8 if checks["量能阶梯"] else 0) + 7 * _clamp(volume_slope / 0.14)
     ma_spread = (ma5 / ma60 - 1) if ma60 > 0 else 0
-    ma_fit = (12 if checks["均线多头"] else 0) + 8 * _clamp(ma_spread / 0.08)
+    ma_fit = (
+        (10 if checks["均线结构"] else 0)
+        + (2 if row.get("ma60_rising") else 0)
+        + 8 * _clamp(ma_spread / 0.08)
+    )
     intraday_fit = (
         10 * _clamp((vwap_ratio - 0.70) / 0.30)
         + 8 * _clamp((stock_return - market_return) / 2.0)

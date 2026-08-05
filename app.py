@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from datetime import datetime, time
 
@@ -24,6 +25,7 @@ from src.strategy import (
     finalize_candidate,
     hard_filter,
     market_session_status,
+    merge_live_daily_bar,
     minute_return_pct,
     normalize_spot,
 )
@@ -96,12 +98,17 @@ h1,h2,h3 { font-family:"Noto Serif SC","Songti SC",serif !important; letter-spac
 .audit-head { border-left:6px solid var(--signal);padding:8px 0 8px 20px;margin:22px 0 26px; }
 .audit-head h2 { font-size:40px;margin:4px 0 8px; }
 .audit-head p { color:#596159;margin:0;max-width:760px; }
+.mode-guide { display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0 10px; }
+.mode-note { background:rgba(255,255,255,.46);border:1px solid var(--line);padding:14px 16px;min-height:92px; }
+.mode-note.recommended { border-color:var(--moss);box-shadow:inset 4px 0 0 var(--moss); }
+.mode-note b { display:block;font-family:"Noto Serif SC","Songti SC",serif;font-size:18px;margin-bottom:5px; }
+.mode-note span { color:#626a63;font-size:12px;line-height:1.65; }
 .muted { color:#6f756e;font-size:12px; }
 .stButton>button { border-radius:1px;background:var(--ink);color:var(--paper);border:0;font-weight:600;min-height:44px; }
 .stButton>button:hover { background:var(--signal);color:white; }
 [data-testid="stDataFrame"] { border:1px solid var(--line); }
 div[data-testid="stExpander"] { border:1px solid var(--line);border-radius:2px;background:rgba(255,255,255,.35); }
-@media(max-width:700px){.hero h1{font-size:40px}.hero:after{font-size:52px}}
+@media(max-width:700px){.hero h1{font-size:40px}.hero:after{font-size:52px}.mode-guide{grid-template-columns:1fr}}
 </style>
 """,
     unsafe_allow_html=True,
@@ -116,6 +123,36 @@ def load_spot(use_demo: bool) -> pd.DataFrame:
 @st.cache_data(ttl=600, show_spinner=False)
 def load_hot_concepts() -> dict[str, list[str]]:
     return AkshareSource().hot_concept_members(6)
+
+
+def render_scan_countdown() -> None:
+    countdown_html = """
+<!doctype html><html><head><meta charset="utf-8"><style>
+*{box-sizing:border-box}body{margin:0;background:transparent;color:#17211c;font-family:"SFMono-Regular","PingFang SC",monospace}
+.clock{display:grid;grid-template-columns:minmax(190px,.72fr) 1.28fr;border:1px solid #c8c3b5;background:rgba(255,255,255,.58);box-shadow:5px 5px 0 rgba(23,33,28,.08)}
+.time{padding:17px 20px;border-right:1px solid #c8c3b5}.label{font-size:11px;letter-spacing:.14em;color:#f05a28;font-weight:700}.digits{font-size:29px;font-weight:750;letter-spacing:.04em;margin-top:5px;font-variant-numeric:tabular-nums}
+.action{padding:17px 20px}.action b{font:700 18px/1.35 Georgia,"Songti SC",serif}.action p{font-size:12px;color:#616861;margin:7px 0 0;line-height:1.55}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#315b45;margin-right:8px;animation:pulse 1.5s infinite}@keyframes pulse{50%{opacity:.25;transform:scale(.72)}}
+@media(max-width:620px){.clock{grid-template-columns:1fr}.time{border-right:0;border-bottom:1px solid #c8c3b5}.digits{font-size:25px}}
+</style></head><body><div class="clock"><div class="time"><div class="label" id="label">NEXT SCAN</div><div class="digits" id="digits">--:--:--</div></div><div class="action"><b><span class="dot"></span><span id="action">正在校准尾盘时钟</span></b><p id="note">建议在三个节点分别观察，最终以14:50后的扫描为主。</p></div></div>
+<script>
+const pad=n=>String(n).padStart(2,'0');
+function at(d,h,m){const x=new Date(d);x.setHours(h,m,0,0);return x}
+function nextWeekday(d){const x=new Date(d);do{x.setDate(x.getDate()+1)}while(x.getDay()===0||x.getDay()===6);return at(x,14,30)}
+function update(){
+ const now=new Date(), day=now.getDay(); let target,label,action,note;
+ if(day!==0&&day!==6&&now<at(now,14,30)){target=at(now,14,30);label='14:30 · FIRST LOOK';action='等待14:30首次观察';note='先建立候选池，不急于下结论。'}
+ else if(day!==0&&day!==6&&now<at(now,14,45)){target=at(now,14,45);label='14:45 · RECHECK';action='现在可做首次扫描';note='距离14:45量价复核还有一段时间。'}
+ else if(day!==0&&day!==6&&now<at(now,14,50)){target=at(now,14,50);label='14:50 · DECISION';action='现在进行第二次复核';note='14:50后的结果作为尾盘最终观察依据。'}
+ else if(day!==0&&day!==6&&now<at(now,15,0)){target=at(now,15,0);label='FINAL WINDOW';action='最终扫描窗口已开启';note='请点击扫描；倒计时表示距离15:00的剩余时间。'}
+ else{target=nextWeekday(now);label='NEXT TRADING DAY';action='今日尾盘窗口已结束';note='已进入下一个工作日14:30倒计时；节假日请以交易所日历为准。'}
+ const diff=Math.max(0,target-now), total=Math.floor(diff/1000), days=Math.floor(total/86400), hours=Math.floor(total%86400/3600), mins=Math.floor(total%3600/60), secs=total%60;
+ document.getElementById('label').textContent=label;document.getElementById('digits').textContent=(days?days+'天 ':'')+pad(hours)+':'+pad(mins)+':'+pad(secs);document.getElementById('action').textContent=action;document.getElementById('note').textContent=note;
+}
+update();setInterval(update,1000);
+</script></body></html>
+    """
+    payload = base64.b64encode(countdown_html.encode("utf-8")).decode("ascii")
+    st.iframe(f"data:text/html;base64,{payload}", height=126)
 
 
 def make_config() -> StrategyConfig:
@@ -174,18 +211,34 @@ if workspace == "历史表现":
     render_history_page(validation_store)
     st.stop()
 
-run = st.button("扫描全市场", type="primary", width="stretch")
-if not run:
+render_scan_countdown()
+st.markdown(
+    """
+<div class="mode-guide">
+  <div class="mode-note"><b>严格标准</b><span>初始规则完整保留：现价 ≥ MA5 &gt; MA10 &gt; MA20 &gt; MA60，四条均线均较5日前上升。用于对照，不写入次日校验。</span></div>
+  <div class="mode-note recommended"><b>理性流程 · 推荐</b><span>将当日实时行情合成临时日K；短中期均线向上且现价位于MA60上方，MA60上升改为排名加分。</span></div>
+</div>
+    """,
+    unsafe_allow_html=True,
+)
+strict_col, rational_col = st.columns(2)
+strict_run = strict_col.button("严格标准扫描", width="stretch", help="完全按初始均线标准执行")
+rational_run = rational_col.button("理性流程扫描（推荐）", type="primary", width="stretch", help="包含当日临时日K与分阶段复核")
+scan_mode = "strict" if strict_run else "rational" if rational_run else None
+if scan_mode is None:
     st.markdown(
         """
 <div class="card">
   <b>等待扫描</b><br><br>
-  点击上方按钮读取最新行情。最佳运行时间为交易日 14:30–15:00；收盘后可复盘，但结果代表最近快照。
+  根据倒计时提示点击对应扫描。14:30建立观察池，14:45复核，14:50后形成最终候选。
 </div>
 """,
         unsafe_allow_html=True,
     )
     st.stop()
+
+scan_mode_label = "严格标准" if scan_mode == "strict" else "理性流程"
+st.caption(f"本次执行：{scan_mode_label}")
 
 try:
     with st.status("正在读取全市场快照…", expanded=True) as progress:
@@ -235,7 +288,11 @@ try:
             if pd.isna(row.get("volume_ratio")):
                 row["volume_ratio"] = 0.0
             row["min_volume_ratio"] = cfg.min_volume_ratio
-            daily_result = analyze_daily(daily_map[code]) if code in daily_map else {"volume_step": False, "ma_bull": False}
+            if code in daily_map:
+                live_daily = merge_live_daily_bar(daily_map[code], row)
+                daily_result = analyze_daily(live_daily, mode=scan_mode)
+            else:
+                daily_result = {"volume_step": False, "ma_bull": False}
             minute_result = (
                 analyze_minute(minute_map[code], cfg.min_vwap_ratio, market_return)
                 if code in minute_map
@@ -268,7 +325,7 @@ else:
 passed = result_df[result_df["passed"] == True]  # noqa: E712
 
 scan_now = datetime.now()
-if not use_demo and time(14, 30) <= scan_now.time() <= time(15, 0):
+if scan_mode == "rational" and not use_demo and time(14, 30) <= scan_now.time() <= time(15, 0):
     frozen = validation_store.freeze_scan(
         scanned_at=scan_now,
         provider=str(raw_spot.attrs.get("provider", "免费行情")),
@@ -281,6 +338,8 @@ if not use_demo and time(14, 30) <= scan_now.time() <= time(15, 0):
         st.success(f"已冻结今日候选 {len(passed)} 只，次一交易日 9:45 和 10:30 分阶段校验。")
     else:
         st.caption("今日候选已在首次扫描时冻结，本次刷新不会改写历史记录。")
+elif scan_mode == "strict" and not use_demo:
+    st.caption("严格标准扫描用于同时点对照，不写入次日校验档案。")
 elif not use_demo:
     st.caption("当前不在 14:30–15:00 策略窗口，本次结果仅供查看，不写入次日校验档案。")
 
@@ -298,7 +357,7 @@ st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 st.markdown("## 今日结论")
 if passed.empty:
-    st.warning("今日无完全符合标的。不要为了交易而放宽条件；可在“观察池”中复核，但不视为策略候选。")
+    st.warning(f"本次“{scan_mode_label}”无完全符合标的。可查看观察结果的具体未通过项，但不视为策略候选。")
 else:
     for rank, (_, row) in enumerate(passed.iterrows(), 1):
         concepts = " / ".join(row["hot_concepts"]) or "未命中前六热点"
@@ -322,16 +381,16 @@ display = display.rename(
         "strategy_rank": "策略排名", "status": "结论", "code": "代码", "name": "名称", "score": "匹配度",
         "change_pct": "涨幅%", "volume_ratio": "量比", "turnover": "换手率%",
         "float_cap_yi": "流通市值(亿)", "volume_step": "阶梯放量",
-        "ma_bull": "均线多头", "vwap_strong": "分时强势", "pullback_ok": "回踩有效",
+        "ma_bull": "均线通过", "vwap_strong": "分时强势", "pullback_ok": "回踩有效",
         "relative_strong": "跑赢大盘",
         "failed_reasons": "未通过项",
         "rank_reason": "主要优势",
     }
 )
-cols = ["策略排名", "结论", "代码", "名称", "匹配度", "主要优势", "涨幅%", "量比", "换手率%", "流通市值(亿)", "阶梯放量", "均线多头", "分时强势", "跑赢大盘", "回踩有效", "题材", "未通过项"]
+cols = ["策略排名", "结论", "代码", "名称", "匹配度", "主要优势", "涨幅%", "量比", "换手率%", "流通市值(亿)", "阶梯放量", "均线通过", "分时强势", "跑赢大盘", "回踩有效", "题材", "未通过项"]
 st.dataframe(display[cols], hide_index=True, width="stretch")
 csv = display[cols].to_csv(index=False).encode("utf-8-sig")
-st.download_button("导出本次结果 CSV", csv, file_name=f"尾盘雷达_{datetime.now():%Y%m%d_%H%M}.csv", mime="text/csv")
+st.download_button("导出本次结果 CSV", csv, file_name=f"尾盘雷达_{scan_mode_label}_{datetime.now():%Y%m%d_%H%M}.csv", mime="text/csv")
 
 if errors:
     with st.expander(f"数据缺失记录（{len(errors)}）"):
@@ -342,7 +401,9 @@ with st.expander("规则口径与风控"):
         """
 - 阶梯放量：近 5 日成交量回归斜率向上、近 4 日至少两次递增，且最新成交量高于 5 日均量 3%。
 - 量比：新浪快照不提供量比时，用今日累计成交量 ÷ 近 5 日同期预期成交量估算。
-- 均线多头：收盘价 ≥ MA5 > MA10 > MA20 > MA60，且四条均线均较 5 日前上升。
+- 当日临时日K：将扫描时的实时价、开高低、成交量合并到历史日线后重新计算均线。
+- 严格均线：现价 ≥ MA5 > MA10 > MA20 > MA60，且四条均线均较 5 日前上升。
+- 理性均线：现价 ≥ MA5 > MA10 > MA20，MA5/10/20较 5 日前上升，且现价在 MA60 上方；MA60上升只作加分。
 - 分时强势：至少 70% 的分钟收盘价位于当日成交均价线上方，最新价仍在均价线上方。
 - 跑赢大盘：个股从首个分钟点至最新分钟点的涨幅高于同期上证指数。
 - 回踩有效：最新价未跌破成交均价，且距离最近 30 分钟高点不超过 1.2%。
@@ -352,6 +413,6 @@ with st.expander("规则口径与风控"):
 建议把“次日 9:30 卖出”理解为需要验证的策略规则，而不是收益承诺。实盘应预先规定单笔仓位、最大亏损和异常停牌处理；本工具不连接券商、不自动下单。
 """
     )
-    st.code(json.dumps(cfg.as_dict(), ensure_ascii=False, indent=2), language="json")
+    st.code(json.dumps({**cfg.as_dict(), "scan_mode": scan_mode}, ensure_ascii=False, indent=2), language="json")
 
 st.caption("数据仅供学习与策略研究，不构成任何投资建议。免费数据可能延迟、缺失或中断，下单前请以券商行情为准。")
