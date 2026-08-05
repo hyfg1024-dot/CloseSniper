@@ -73,6 +73,16 @@ class ValidationStore:
                     index_1030_return REAL,
                     calculated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS open_snapshots (
+                    id INTEGER PRIMARY KEY,
+                    signal_id INTEGER NOT NULL UNIQUE REFERENCES signals(id) ON DELETE CASCADE,
+                    validation_date TEXT NOT NULL,
+                    open_price REAL NOT NULL,
+                    captured_price REAL NOT NULL,
+                    open_return REAL NOT NULL,
+                    captured_return REAL NOT NULL,
+                    captured_at TEXT NOT NULL
+                );
                 """
             )
             existing = {
@@ -147,15 +157,32 @@ class ValidationStore:
                 """
                 SELECT s.id AS signal_id, s.code, s.name, s.entry_price, s.score,
                        sc.trade_date AS signal_date, v.validation_date,
-                       v.price_0945, v.price_1030
+                       v.price_0945, v.price_1030, o.open_price AS snapshot_open_price,
+                       o.captured_at AS open_captured_at
                 FROM signals s
                 JOIN scans sc ON sc.id = s.scan_id
                 LEFT JOIN validations v ON v.signal_id = s.id
+                LEFT JOIN open_snapshots o ON o.signal_id = s.id
                 WHERE sc.trade_date < ? AND (v.id IS NULL OR v.price_1030 IS NULL)
                 ORDER BY sc.trade_date, s.score DESC
                 """,
                 (before_date,),
             ).fetchall()
+
+    def save_open_snapshot(self, signal_id: int, values: dict[str, Any]) -> None:
+        columns = [
+            "validation_date", "open_price", "captured_price",
+            "open_return", "captured_return", "captured_at",
+        ]
+        with self.connect() as db:
+            db.execute(
+                f"""
+                INSERT OR REPLACE INTO open_snapshots
+                (signal_id, {", ".join(columns)})
+                VALUES (?, {", ".join("?" for _ in columns)})
+                """,
+                [signal_id, *[values.get(column) for column in columns]],
+            )
 
     def save_validation(self, signal_id: int, values: dict[str, Any]) -> None:
         columns = [
@@ -178,14 +205,19 @@ class ValidationStore:
     def validation_frame(self) -> pd.DataFrame:
         query = """
             SELECT sc.trade_date AS signal_date, sc.scanned_at, s.code, s.name,
-                   s.entry_price, s.score, v.validation_date, v.open_price,
-                   v.price_0945, v.open_return, v.return_0945, v.max_return,
+                   s.entry_price, s.score,
+                   COALESCE(v.validation_date, o.validation_date) AS validation_date,
+                   COALESCE(v.open_price, o.open_price) AS open_price,
+                   v.price_0945, COALESCE(v.open_return, o.open_return) AS open_return,
+                   o.captured_price, o.captured_return, o.captured_at AS open_captured_at,
+                   v.return_0945, v.max_return,
                    v.max_drawdown, v.index_open_return, v.index_0945_return,
                    v.price_1030, v.return_1030, v.max_return_1030,
                    v.max_drawdown_1030, v.index_1030_return
             FROM signals s
             JOIN scans sc ON sc.id = s.scan_id
             LEFT JOIN validations v ON v.signal_id = s.id
+            LEFT JOIN open_snapshots o ON o.signal_id = s.id
             ORDER BY sc.trade_date DESC, s.score DESC
         """
         with self.connect() as db:

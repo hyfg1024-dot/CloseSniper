@@ -9,6 +9,54 @@ from src.data_source import AkshareSource
 from src.validation_store import ValidationStore
 
 
+def capture_open_pending(
+    store: ValidationStore,
+    source: AkshareSource | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """在次日早盘窗口保存开盘价与点击时快照，不提前生成9:45历史结论。"""
+    now = now or datetime.now()
+    source = source or AkshareSource()
+    pending = store.pending_signals(now.date().isoformat())
+    summary: dict[str, Any] = {
+        "pending": len(pending),
+        "captured": 0,
+        "skipped": 0,
+        "errors": {},
+    }
+    for signal in pending:
+        code = str(signal["code"])
+        try:
+            stock_days = _split_days(source.minute_recent(code))
+            validation_date = _first_day_after(stock_days, str(signal["signal_date"]))
+            if validation_date is None:
+                summary["skipped"] += 1
+                continue
+            if validation_date == now.date().isoformat() and now.time() < time(9, 30):
+                summary["skipped"] += 1
+                continue
+            result = _calculate_open_snapshot(
+                stock_days[validation_date],
+                float(signal["entry_price"]),
+                cutoff=now.time() if validation_date == now.date().isoformat() else time(9, 50),
+            )
+            if result is None:
+                summary["skipped"] += 1
+                continue
+            store.save_open_snapshot(
+                int(signal["signal_id"]),
+                {
+                    "validation_date": validation_date,
+                    **result,
+                    "captured_at": now.isoformat(timespec="seconds"),
+                },
+            )
+            summary["captured"] += 1
+        except Exception as exc:
+            summary["errors"][code] = str(exc)
+    return summary
+
+
 def validate_pending(
     store: ValidationStore,
     source: AkshareSource | None = None,
@@ -107,6 +155,28 @@ def _split_days(raw: pd.DataFrame | None) -> dict[str, pd.DataFrame]:
 def _first_day_after(days: dict[str, pd.DataFrame], signal_date: str) -> str | None:
     later = sorted(date for date in days if date > signal_date)
     return later[0] if later else None
+
+
+def _calculate_open_snapshot(
+    rows: pd.DataFrame,
+    entry_price: float,
+    *,
+    cutoff: time,
+) -> dict[str, float] | None:
+    if rows.empty or entry_price <= 0:
+        return None
+    effective_cutoff = min(cutoff, time(9, 50))
+    window = rows[rows["timestamp"].dt.time <= effective_cutoff].copy()
+    if window.empty:
+        return None
+    open_price = float(window.iloc[0]["open"])
+    captured_price = float(window.iloc[-1]["close"])
+    return {
+        "open_price": open_price,
+        "captured_price": captured_price,
+        "open_return": (open_price / entry_price - 1) * 100,
+        "captured_return": (captured_price / entry_price - 1) * 100,
+    }
 
 
 def _calculate_windows(

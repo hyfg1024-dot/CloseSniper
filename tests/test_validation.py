@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.validation_service import validate_pending
+from src.validation_service import capture_open_pending, validate_pending
 from src.validation_store import ValidationStore
 
 
@@ -118,6 +118,31 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(second["completed_1030"], 1)
         self.assertAlmostEqual(completed["return_1030"], 12.0)
         self.assertEqual(self.store.pending_count("2026-08-03"), 0)
+
+    def test_open_button_captures_provisional_result_before_0945(self):
+        self.store.freeze_scan(
+            scanned_at=datetime(2026, 7, 31, 14, 35),
+            provider="测试", market_count=5000, hard_count=12,
+            config={},
+            candidates=[{
+                "code": "600001", "name": "测试", "price": 10.0, "score": 88,
+                "change_pct": 4.0, "volume_ratio": 1.5, "turnover": 7.0,
+                "float_cap_yi": 100,
+            }],
+        )
+
+        summary = capture_open_pending(
+            self.store,
+            FakeSource(),
+            now=datetime(2026, 8, 3, 9, 35),
+        )
+        row = self.store.validation_frame().iloc[0]
+
+        self.assertEqual(summary["captured"], 1)
+        self.assertAlmostEqual(row["open_return"], 0.0)
+        self.assertAlmostEqual(row["captured_return"], 1.0)
+        self.assertTrue(pd.isna(row["return_0945"]))
+        self.assertEqual(self.store.pending_count("2026-08-03"), 1)
 
 
 if __name__ == "__main__":
