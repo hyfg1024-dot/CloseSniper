@@ -96,6 +96,20 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(final.loc["600003", "persistence"], "14:52新进入")
         self.assertEqual(len(self.store.validation_frame()), 3)
 
+    def test_strict_daily_result_keeps_latest_slot_under_its_own_mode(self):
+        common = dict(provider="测试")
+        self.store.save_strict_scan(
+            slot="1430", scanned_at=datetime(2026, 8, 3, 14, 30),
+            candidates=[{"code": "600001", "name": "早段", "price": 10, "score": 80}], **common,
+        )
+        self.store.save_strict_scan(
+            slot="1452", scanned_at=datetime(2026, 8, 3, 14, 52),
+            candidates=[{"code": "600002", "name": "终段", "price": 20, "score": 90}], **common,
+        )
+        latest = self.store.latest_strict_frame("2026-08-03")
+        self.assertEqual(latest.iloc[0]["slot"], "1452")
+        self.assertEqual(latest.iloc[0]["code"], "600002")
+
     def test_validation_separates_open_0945_and_1030(self):
         self.store.freeze_scan(
             scanned_at=datetime(2026, 7, 31, 14, 35),

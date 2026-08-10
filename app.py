@@ -152,6 +152,35 @@ def make_config() -> StrategyConfig:
     )
 
 
+def render_daily_result_panel(container, title: str, frame: pd.DataFrame, note: str) -> None:
+    with container:
+        st.markdown(f"#### {title} · 当日结果")
+        st.caption(note)
+        if frame.empty:
+            st.info("今日尚无结果。")
+            return
+        available = frame[frame["code"].notna()].copy() if "code" in frame else pd.DataFrame()
+        slot = str(frame.iloc[0].get("slot", "")) if not frame.empty else ""
+        if available.empty:
+            suffix = f"（{slot[:2]}:{slot[2:]}）" if slot else ""
+            st.warning(f"本节点已完成，但没有符合条件的股票{suffix}。")
+            return
+        if "composite_score" in available:
+            display = available[[
+                "code", "name", "composite_score", "score_1430", "score_1445", "score_1452", "persistence",
+            ]].rename(columns={
+                "code": "代码", "name": "名称", "composite_score": "综合分",
+                "score_1430": "14:30", "score_1445": "14:45", "score_1452": "14:52",
+                "persistence": "持续性",
+            })
+        else:
+            score_column = "score" if "score" in available else "匹配度"
+            display = available[["code", "name", score_column]].rename(columns={
+                "code": "代码", "name": "名称", score_column: "评分",
+            })
+        st.dataframe(display, hide_index=True, width="stretch")
+
+
 cfg = make_config()
 status, status_note = market_session_status()
 st.sidebar.markdown("---")
@@ -201,32 +230,24 @@ st.markdown(
 strict_col, rational_col = st.columns(2)
 strict_run = strict_col.button("严格标准扫描", width="stretch", help="完全按初始均线标准执行")
 rational_run = rational_col.button("理性流程扫描（推荐）", type="primary", width="stretch", help="包含当日临时日K与分阶段复核")
+strict_panel = strict_col.container(border=True)
+rational_panel = rational_col.container(border=True)
 scan_mode = "strict" if strict_run else "rational" if rational_run else None
 if scan_mode is None:
-    st.markdown(
-        """
-<div class="card">
-  <b>等待扫描</b><br><br>
-  后台任务将在14:30建立观察池、14:45复核，并于14:52生成最终候选。按钮仍可用于手动补充对应节点。
-</div>
-""",
-        unsafe_allow_html=True,
-    )
     today = datetime.now().date().isoformat()
-    stages = validation_store.staged_frame(today)
-    final = validation_store.final_frame(today)
-    if not final.empty:
-        st.markdown("## 今日综合最终结果")
-        final_display = final.rename(columns={
-            "code": "代码", "name": "名称", "composite_score": "综合分", "entry_price": "14:52信号价",
-            "score_1430": "14:30", "score_1445": "14:45", "score_1452": "14:52",
-            "appearances": "入选次数", "persistence": "持续性",
-        })
-        st.dataframe(final_display, hide_index=True, width="stretch")
-        st.success("该名单已自动纳入次日校验。")
-    elif not stages.empty:
-        completed_slots = "、".join(sorted(stages["slot"].unique()))
-        st.info(f"今日已完成节点：{completed_slots}；等待14:52生成最终名单。")
+    render_daily_result_panel(
+        strict_panel,
+        "严格标准",
+        validation_store.latest_strict_frame(today),
+        "同一时点严格均线筛选，仅用于两种方法对照。",
+    )
+    render_daily_result_panel(
+        rational_panel,
+        "理性流程",
+        validation_store.latest_rational_frame(today),
+        "14:52后显示三时点综合名单，并自动进入次日校验。",
+    )
+    st.caption("后台任务将在14:30、14:45和14:52自动更新上方两个结果区。")
     st.stop()
 
 scan_mode_label = "严格标准" if scan_mode == "strict" else "理性流程"
@@ -253,13 +274,14 @@ errors = scan_result.errors
 passed = result_df[result_df["passed"] == True]  # noqa: E712
 
 scan_now = datetime.now()
-if scan_mode == "rational" and not use_demo and time(14, 30) <= scan_now.time() <= time(15, 0):
-    if scan_now.time() < time(14, 45):
-        slot = "1430"
-    elif scan_now.time() < time(14, 52):
-        slot = "1445"
-    else:
-        slot = "1452"
+in_scan_window = time(14, 30) <= scan_now.time() <= time(15, 0)
+if scan_now.time() < time(14, 45):
+    slot = "1430"
+elif scan_now.time() < time(14, 52):
+    slot = "1445"
+else:
+    slot = "1452"
+if scan_mode == "rational" and not use_demo and in_scan_window:
     validation_store.save_staged_scan(
         slot=slot,
         scanned_at=scan_now,
@@ -276,20 +298,31 @@ if scan_mode == "rational" and not use_demo and time(14, 30) <= scan_now.time() 
             st.success(f"14:52综合名单已冻结 {len(final)} 只，并纳入次日校验。")
         else:
             st.caption("今日综合最终名单已经生成，本次扫描不会改写历史记录。")
-        if not final.empty:
-            st.markdown("## 三时点综合最终结果")
-            final_display = final.rename(columns={
-                "code": "代码", "name": "名称", "composite_score": "综合分", "entry_price": "14:52信号价",
-                "score_1430": "14:30", "score_1445": "14:45", "score_1452": "14:52",
-                "appearances": "入选次数", "persistence": "持续性",
-            })
-            st.dataframe(final_display, hide_index=True, width="stretch")
     else:
         st.success(f"已保存 {slot[:2]}:{slot[2:]} 候选 {len(passed)} 只，等待后续节点确认。")
-elif scan_mode == "strict" and not use_demo:
-    st.caption("严格标准扫描用于同时点对照，不写入次日校验档案。")
+elif scan_mode == "strict" and not use_demo and in_scan_window:
+    validation_store.save_strict_scan(
+        slot=slot,
+        scanned_at=scan_now,
+        provider=scan_result.provider,
+        candidates=passed.to_dict("records"),
+    )
+    st.caption("严格标准结果已保存到左侧结果区，用于同时点对照；不重复写入次日校验。")
 elif not use_demo:
     st.caption("当前不在 14:30–15:00 策略窗口，本次结果仅供查看，不写入次日校验档案。")
+
+today = scan_now.date().isoformat()
+strict_panel_frame = passed if scan_mode == "strict" else validation_store.latest_strict_frame(today)
+if scan_mode == "rational" and in_scan_window and slot == "1452" and not use_demo:
+    rational_panel_frame = validation_store.final_frame(today)
+else:
+    rational_panel_frame = passed if scan_mode == "rational" else validation_store.latest_rational_frame(today)
+render_daily_result_panel(
+    strict_panel, "严格标准", strict_panel_frame, "同一时点严格均线筛选，仅用于两种方法对照。"
+)
+render_daily_result_panel(
+    rational_panel, "理性流程", rational_panel_frame, "14:52综合结果自动进入次日校验。"
+)
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("全市场", f"{funnel['全市场']:,}")

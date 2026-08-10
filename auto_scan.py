@@ -7,7 +7,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from src.scan_service import run_market_scan
+from src.scan_service import derive_strict_frame, run_market_scan
 from src.strategy import StrategyConfig
 from src.validation_store import ValidationStore
 
@@ -28,7 +28,15 @@ def main() -> None:
         cfg = StrategyConfig()
         result = run_market_scan(cfg, mode="rational", now=now)
         candidates = result.candidates.to_dict("records")
+        strict_frame = derive_strict_frame(result.result_frame)
+        strict_candidates = strict_frame[strict_frame["passed"] == True].to_dict("records")  # noqa: E712
         store = ValidationStore()
+        store.save_strict_scan(
+            slot=args.slot,
+            scanned_at=now,
+            provider=result.provider,
+            candidates=strict_candidates,
+        )
         store.save_staged_scan(
             slot=args.slot,
             scanned_at=now,
@@ -40,7 +48,8 @@ def main() -> None:
         )
         finalized = store.finalize_staged_day(now.date().isoformat()) if args.slot == "1452" else False
         print(json.dumps({
-            "status": "ok", "slot": args.slot, "candidates": len(candidates), "finalized": finalized,
+            "status": "ok", "slot": args.slot, "rational": len(candidates),
+            "strict": len(strict_candidates), "finalized": finalized,
         }, ensure_ascii=False))
 
 

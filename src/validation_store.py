@@ -107,6 +107,23 @@ class ValidationStore:
                     float_cap_yi REAL,
                     UNIQUE(staged_scan_id, code)
                 );
+                CREATE TABLE IF NOT EXISTS strict_scans (
+                    id INTEGER PRIMARY KEY,
+                    trade_date TEXT NOT NULL,
+                    slot TEXT NOT NULL,
+                    scanned_at TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    UNIQUE(trade_date, slot)
+                );
+                CREATE TABLE IF NOT EXISTS strict_candidates (
+                    id INTEGER PRIMARY KEY,
+                    strict_scan_id INTEGER NOT NULL REFERENCES strict_scans(id) ON DELETE CASCADE,
+                    code TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    score REAL NOT NULL,
+                    UNIQUE(strict_scan_id, code)
+                );
                 """
             )
             existing = {
@@ -266,6 +283,71 @@ class ValidationStore:
         """
         with self.connect() as db:
             return pd.read_sql_query(query, db, params=(trade_date,))
+
+    def save_strict_scan(
+        self,
+        *,
+        slot: str,
+        scanned_at: datetime,
+        provider: str,
+        candidates: Iterable[dict[str, Any]],
+    ) -> None:
+        if slot not in {"1430", "1445", "1452"}:
+            raise ValueError(f"未知扫描节点：{slot}")
+        trade_date = scanned_at.date().isoformat()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO strict_scans (trade_date, slot, scanned_at, provider)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(trade_date, slot) DO UPDATE SET
+                    scanned_at=excluded.scanned_at, provider=excluded.provider
+                """,
+                (trade_date, slot, scanned_at.isoformat(timespec="seconds"), provider or "未知"),
+            )
+            scan_id = int(db.execute(
+                "SELECT id FROM strict_scans WHERE trade_date=? AND slot=?", (trade_date, slot)
+            ).fetchone()["id"])
+            db.execute("DELETE FROM strict_candidates WHERE strict_scan_id=?", (scan_id,))
+            db.executemany(
+                """
+                INSERT INTO strict_candidates (strict_scan_id, code, name, entry_price, score)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (scan_id, str(item["code"]), str(item["name"]), float(item["price"]), float(item["score"]))
+                    for item in candidates
+                ],
+            )
+
+    def latest_strict_frame(self, trade_date: str) -> pd.DataFrame:
+        query = """
+            SELECT ss.slot, ss.scanned_at, c.code, c.name, c.score, c.entry_price
+            FROM strict_scans ss
+            LEFT JOIN strict_candidates c ON c.strict_scan_id=ss.id
+            WHERE ss.trade_date=? AND ss.slot=(
+                SELECT MAX(slot) FROM strict_scans WHERE trade_date=?
+            )
+            ORDER BY c.score DESC
+        """
+        with self.connect() as db:
+            return pd.read_sql_query(query, db, params=(trade_date, trade_date))
+
+    def latest_rational_frame(self, trade_date: str) -> pd.DataFrame:
+        final = self.final_frame(trade_date)
+        if not final.empty:
+            return final
+        query = """
+            SELECT ss.slot, ss.scanned_at, c.code, c.name, c.score, c.entry_price
+            FROM staged_scans ss
+            LEFT JOIN staged_candidates c ON c.staged_scan_id=ss.id
+            WHERE ss.trade_date=? AND ss.slot=(
+                SELECT MAX(slot) FROM staged_scans WHERE trade_date=?
+            )
+            ORDER BY c.score DESC
+        """
+        with self.connect() as db:
+            return pd.read_sql_query(query, db, params=(trade_date, trade_date))
 
     def final_frame(self, trade_date: str) -> pd.DataFrame:
         query = """

@@ -110,6 +110,8 @@ def render_validation_page(store: ValidationStore) -> None:
             columns={
                 "signal_date": "信号日", "validation_date": "校验日", "code": "代码",
                 "name": "名称", "entry_price": "信号价", "score": "综合评分",
+                "score_1430": "14:30评分", "score_1445": "14:45评分",
+                "score_1452": "14:52评分", "persistence": "持续性",
                 "open_return": "9:30收益%", "captured_return": "抓取时收益%",
                 "open_captured_at": "开盘抓取时间", "return_0945": "9:45收益%",
                 "return_1030": "10:30收益%",
@@ -119,7 +121,8 @@ def render_validation_page(store: ValidationStore) -> None:
             }
         )
         columns = [
-            "信号日", "校验日", "代码", "名称", "综合评分", "信号价", "9:30收益%",
+            "信号日", "校验日", "代码", "名称", "综合评分", "持续性",
+            "14:30评分", "14:45评分", "14:52评分", "信号价", "9:30收益%",
             "抓取时收益%", "开盘抓取时间", "9:45收益%", "10:30收益%",
             "15分钟最高%", "60分钟最高%",
             "60分钟回撤%", "指数10:30%", "15分钟命中", "60分钟命中",

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable
+from copy import deepcopy
 
 import pandas as pd
 
@@ -43,6 +44,20 @@ class ScanResult:
     @property
     def candidates(self) -> pd.DataFrame:
         return self.result_frame[self.result_frame["passed"] == True].copy()  # noqa: E712
+
+
+def derive_strict_frame(rational_frame: pd.DataFrame) -> pd.DataFrame:
+    """复用同一份行情分析，将理性均线门槛切换为严格均线门槛。"""
+    if rational_frame.empty:
+        return rational_frame.copy()
+    rows: list[dict[str, Any]] = []
+    for source in rational_frame.to_dict("records"):
+        row = deepcopy(source)
+        row["ma_bull"] = bool(row.get("ma_strict"))
+        rows.append(finalize_candidate(row))
+    frame = pd.DataFrame(rows).sort_values(["passed", "score"], ascending=[False, False])
+    frame["strategy_rank"] = range(1, len(frame) + 1)
+    return frame
 
 
 def run_market_scan(
