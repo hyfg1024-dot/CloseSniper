@@ -83,6 +83,30 @@ class ValidationStore:
                     captured_return REAL NOT NULL,
                     captured_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS staged_scans (
+                    id INTEGER PRIMARY KEY,
+                    trade_date TEXT NOT NULL,
+                    slot TEXT NOT NULL,
+                    scanned_at TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    market_count INTEGER NOT NULL,
+                    hard_count INTEGER NOT NULL,
+                    config_json TEXT NOT NULL,
+                    UNIQUE(trade_date, slot)
+                );
+                CREATE TABLE IF NOT EXISTS staged_candidates (
+                    id INTEGER PRIMARY KEY,
+                    staged_scan_id INTEGER NOT NULL REFERENCES staged_scans(id) ON DELETE CASCADE,
+                    code TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    score REAL NOT NULL,
+                    change_pct REAL,
+                    volume_ratio REAL,
+                    turnover REAL,
+                    float_cap_yi REAL,
+                    UNIQUE(staged_scan_id, code)
+                );
                 """
             )
             existing = {
@@ -95,6 +119,164 @@ class ValidationStore:
             ):
                 if column not in existing:
                     db.execute(f"ALTER TABLE validations ADD COLUMN {column} REAL")
+            signal_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(signals)").fetchall()
+            }
+            for column in ("score_1430", "score_1445", "score_1452"):
+                if column not in signal_columns:
+                    db.execute(f"ALTER TABLE signals ADD COLUMN {column} REAL")
+            if "appearances" not in signal_columns:
+                db.execute("ALTER TABLE signals ADD COLUMN appearances INTEGER")
+            if "persistence" not in signal_columns:
+                db.execute("ALTER TABLE signals ADD COLUMN persistence TEXT")
+
+    def save_staged_scan(
+        self,
+        *,
+        slot: str,
+        scanned_at: datetime,
+        provider: str,
+        market_count: int,
+        hard_count: int,
+        config: dict[str, Any],
+        candidates: Iterable[dict[str, Any]],
+    ) -> None:
+        if slot not in {"1430", "1445", "1452"}:
+            raise ValueError(f"未知扫描节点：{slot}")
+        trade_date = scanned_at.date().isoformat()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO staged_scans
+                (trade_date, slot, scanned_at, provider, market_count, hard_count, config_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trade_date, slot) DO UPDATE SET
+                    scanned_at=excluded.scanned_at, provider=excluded.provider,
+                    market_count=excluded.market_count, hard_count=excluded.hard_count,
+                    config_json=excluded.config_json
+                """,
+                (
+                    trade_date, slot, scanned_at.isoformat(timespec="seconds"), provider or "未知",
+                    int(market_count), int(hard_count), json.dumps(config, ensure_ascii=False, sort_keys=True),
+                ),
+            )
+            scan_id = int(db.execute(
+                "SELECT id FROM staged_scans WHERE trade_date=? AND slot=?", (trade_date, slot)
+            ).fetchone()["id"])
+            db.execute("DELETE FROM staged_candidates WHERE staged_scan_id=?", (scan_id,))
+            rows = [
+                (
+                    scan_id, str(item["code"]), str(item["name"]), float(item["price"]),
+                    float(item["score"]), _float_or_none(item.get("change_pct")),
+                    _float_or_none(item.get("volume_ratio")), _float_or_none(item.get("turnover")),
+                    _float_or_none(item.get("float_cap_yi")),
+                )
+                for item in candidates
+            ]
+            db.executemany(
+                """
+                INSERT INTO staged_candidates
+                (staged_scan_id, code, name, entry_price, score, change_pct, volume_ratio, turnover, float_cap_yi)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+    def finalize_staged_day(self, trade_date: str) -> bool:
+        """以14:52候选为门槛生成最终名单；返回 True 表示首次生成。"""
+        with self.connect() as db:
+            final_stage = db.execute(
+                "SELECT * FROM staged_scans WHERE trade_date=? AND slot='1452'", (trade_date,)
+            ).fetchone()
+            if final_stage is None:
+                return False
+            cursor = db.execute(
+                """
+                INSERT OR IGNORE INTO scans
+                (trade_date, scanned_at, provider, market_count, hard_count, config_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    trade_date, final_stage["scanned_at"], final_stage["provider"],
+                    final_stage["market_count"], final_stage["hard_count"], final_stage["config_json"],
+                ),
+            )
+            if cursor.rowcount == 0:
+                return False
+            scan_id = int(cursor.lastrowid)
+            final_rows = db.execute(
+                """
+                SELECT c.* FROM staged_candidates c
+                JOIN staged_scans ss ON ss.id=c.staged_scan_id
+                WHERE ss.trade_date=? AND ss.slot='1452'
+                """,
+                (trade_date,),
+            ).fetchall()
+            for item in final_rows:
+                scores: dict[str, float | None] = {}
+                for slot in ("1430", "1445", "1452"):
+                    row = db.execute(
+                        """
+                        SELECT c.score FROM staged_candidates c
+                        JOIN staged_scans ss ON ss.id=c.staged_scan_id
+                        WHERE ss.trade_date=? AND ss.slot=? AND c.code=?
+                        """,
+                        (trade_date, slot, item["code"]),
+                    ).fetchone()
+                    scores[slot] = float(row["score"]) if row else None
+                appearances = sum(value is not None for value in scores.values())
+                composite = round(
+                    0.20 * (scores["1430"] or 0)
+                    + 0.30 * (scores["1445"] or 0)
+                    + 0.50 * (scores["1452"] or 0),
+                    1,
+                )
+                if appearances == 3:
+                    persistence = "三次稳定"
+                elif scores["1445"] is not None:
+                    persistence = "连续两次"
+                elif scores["1430"] is not None:
+                    persistence = "中途波动"
+                else:
+                    persistence = "14:52新进入"
+                db.execute(
+                    """
+                    INSERT INTO signals
+                    (scan_id, code, name, entry_price, score, change_pct, volume_ratio, turnover,
+                     float_cap_yi, score_1430, score_1445, score_1452, appearances, persistence)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scan_id, item["code"], item["name"], item["entry_price"], composite,
+                        item["change_pct"], item["volume_ratio"], item["turnover"], item["float_cap_yi"],
+                        scores["1430"], scores["1445"], scores["1452"], appearances, persistence,
+                    ),
+                )
+            return True
+
+    def staged_frame(self, trade_date: str) -> pd.DataFrame:
+        query = """
+            SELECT ss.trade_date, ss.slot, ss.scanned_at, c.code, c.name, c.entry_price,
+                   c.score, c.change_pct, c.volume_ratio, c.turnover, c.float_cap_yi
+            FROM staged_scans ss
+            LEFT JOIN staged_candidates c ON c.staged_scan_id=ss.id
+            WHERE ss.trade_date=?
+            ORDER BY ss.slot, c.score DESC
+        """
+        with self.connect() as db:
+            return pd.read_sql_query(query, db, params=(trade_date,))
+
+    def final_frame(self, trade_date: str) -> pd.DataFrame:
+        query = """
+            SELECT s.code, s.name, s.score AS composite_score, s.entry_price,
+                   s.score_1430, s.score_1445, s.score_1452, s.appearances, s.persistence
+            FROM signals s JOIN scans sc ON sc.id=s.scan_id
+            WHERE sc.trade_date=?
+            ORDER BY s.score DESC, s.appearances DESC
+        """
+        with self.connect() as db:
+            return pd.read_sql_query(query, db, params=(trade_date,))
 
     def freeze_scan(
         self,
@@ -205,7 +387,8 @@ class ValidationStore:
     def validation_frame(self) -> pd.DataFrame:
         query = """
             SELECT sc.trade_date AS signal_date, sc.scanned_at, s.code, s.name,
-                   s.entry_price, s.score,
+                   s.entry_price, s.score, s.score_1430, s.score_1445, s.score_1452,
+                   s.appearances, s.persistence,
                    COALESCE(v.validation_date, o.validation_date) AS validation_date,
                    COALESCE(v.open_price, o.open_price) AS open_price,
                    v.price_0945, COALESCE(v.open_return, o.open_return) AS open_return,

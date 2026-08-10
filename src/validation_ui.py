@@ -93,7 +93,7 @@ def render_validation_page(store: ValidationStore) -> None:
     st.caption(f"累计冻结信号：{len(frame)} 只")
 
     if frame.empty:
-        st.info("尚无冻结候选。交易日 14:30–15:00 完成首次真实扫描后，系统会自动存档。")
+        st.info("尚无冻结候选。交易日完成14:30、14:45、14:52三阶段扫描后，系统会冻结综合最终名单。")
         _render_definition()
         return
 
@@ -109,7 +109,7 @@ def render_validation_page(store: ValidationStore) -> None:
         display = ready.rename(
             columns={
                 "signal_date": "信号日", "validation_date": "校验日", "code": "代码",
-                "name": "名称", "entry_price": "信号价", "score": "评分",
+                "name": "名称", "entry_price": "信号价", "score": "综合评分",
                 "open_return": "9:30收益%", "captured_return": "抓取时收益%",
                 "open_captured_at": "开盘抓取时间", "return_0945": "9:45收益%",
                 "return_1030": "10:30收益%",
@@ -119,7 +119,7 @@ def render_validation_page(store: ValidationStore) -> None:
             }
         )
         columns = [
-            "信号日", "校验日", "代码", "名称", "评分", "信号价", "9:30收益%",
+            "信号日", "校验日", "代码", "名称", "综合评分", "信号价", "9:30收益%",
             "抓取时收益%", "开盘抓取时间", "9:45收益%", "10:30收益%",
             "15分钟最高%", "60分钟最高%",
             "60分钟回撤%", "指数10:30%", "15分钟命中", "60分钟命中",
@@ -213,7 +213,8 @@ def _render_definition() -> None:
     with st.expander("校验口径"):
         st.markdown(
             """
-- **信号价**：14:30–15:00 首次成功扫描时冻结的实时价格，不事后改写。
+- **信号价**：14:52最终扫描时的实时价格，不事后改写。
+- **综合评分**：20% × 14:30评分 + 30% × 14:45评分 + 50% × 14:52评分；未入选节点按0分计算。
 - **9:30收益**：次一实际交易日首分钟开盘价相对信号价的收益，对应原策略退出。
 - **抓取时收益**：9:30–9:50 点击早盘按钮时的最新分钟价相对信号价收益，仅作现场参考，不进入固定口径历史统计。
 - **9:45收益**：截至 9:45 分钟线收盘价相对信号价的收益，仅作对照。

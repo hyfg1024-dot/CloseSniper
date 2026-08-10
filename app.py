@@ -9,25 +9,12 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.data_source import (
-    AkshareSource,
     MarketDataError,
-    demo_daily,
-    demo_index_minute,
-    demo_minute,
-    demo_spot,
-    parallel_fetch,
 )
+from src.scan_service import run_market_scan
 from src.strategy import (
     StrategyConfig,
-    analyze_daily,
-    analyze_minute,
-    estimate_volume_ratio,
-    finalize_candidate,
-    hard_filter,
     market_session_status,
-    merge_live_daily_bar,
-    minute_return_pct,
-    normalize_spot,
 )
 from src.validation_store import ValidationStore
 from src.validation_ui import render_history_page, render_validation_page
@@ -115,16 +102,6 @@ div[data-testid="stExpander"] { border:1px solid var(--line);border-radius:2px;b
 )
 
 
-@st.cache_data(ttl=90, show_spinner=False)
-def load_spot(use_demo: bool) -> pd.DataFrame:
-    return demo_spot() if use_demo else AkshareSource().spot()
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def load_hot_concepts() -> dict[str, list[str]]:
-    return AkshareSource().hot_concept_members(6)
-
-
 def render_scan_countdown() -> None:
     countdown_html = """
 <!doctype html><html><head><meta charset="utf-8"><style>
@@ -133,7 +110,7 @@ def render_scan_countdown() -> None:
 .time{padding:17px 20px;border-right:1px solid #c8c3b5}.label{font-size:11px;letter-spacing:.14em;color:#f05a28;font-weight:700}.digits{font-size:29px;font-weight:750;letter-spacing:.04em;margin-top:5px;font-variant-numeric:tabular-nums}
 .action{padding:17px 20px}.action b{font:700 18px/1.35 Georgia,"Songti SC",serif}.action p{font-size:12px;color:#616861;margin:7px 0 0;line-height:1.55}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#315b45;margin-right:8px;animation:pulse 1.5s infinite}@keyframes pulse{50%{opacity:.25;transform:scale(.72)}}
 @media(max-width:620px){.clock{grid-template-columns:1fr}.time{border-right:0;border-bottom:1px solid #c8c3b5}.digits{font-size:25px}}
-</style></head><body><div class="clock"><div class="time"><div class="label" id="label">NEXT SCAN</div><div class="digits" id="digits">--:--:--</div></div><div class="action"><b><span class="dot"></span><span id="action">正在校准尾盘时钟</span></b><p id="note">建议在三个节点分别观察，最终以14:50后的扫描为主。</p></div></div>
+</style></head><body><div class="clock"><div class="time"><div class="label" id="label">NEXT SCAN</div><div class="digits" id="digits">--:--:--</div></div><div class="action"><b><span class="dot"></span><span id="action">正在校准尾盘时钟</span></b><p id="note">系统在三个节点自动扫描，14:52生成综合最终名单。</p></div></div>
 <script>
 const pad=n=>String(n).padStart(2,'0');
 function at(d,h,m){const x=new Date(d);x.setHours(h,m,0,0);return x}
@@ -142,7 +119,7 @@ function update(){
  const now=new Date(), day=now.getDay(); let target,label,action,note;
  if(day!==0&&day!==6&&now<at(now,14,30)){target=at(now,14,30);label='14:30 · FIRST LOOK';action='等待14:30首次观察';note='先建立候选池，不急于下结论。'}
  else if(day!==0&&day!==6&&now<at(now,14,45)){target=at(now,14,45);label='14:45 · RECHECK';action='现在可做首次扫描';note='距离14:45量价复核还有一段时间。'}
- else if(day!==0&&day!==6&&now<at(now,14,50)){target=at(now,14,50);label='14:50 · DECISION';action='现在进行第二次复核';note='14:50后的结果作为尾盘最终观察依据。'}
+ else if(day!==0&&day!==6&&now<at(now,14,52)){target=at(now,14,52);label='14:52 · DECISION';action='14:45复核已经完成';note='14:52将自动生成综合最终名单。'}
  else if(day!==0&&day!==6&&now<at(now,15,0)){target=at(now,15,0);label='FINAL WINDOW';action='最终扫描窗口已开启';note='请点击扫描；倒计时表示距离15:00的剩余时间。'}
  else{target=nextWeekday(now);label='NEXT TRADING DAY';action='今日尾盘窗口已结束';note='已进入下一个工作日14:30倒计时；节假日请以交易所日历为准。'}
  const diff=Math.max(0,target-now), total=Math.floor(diff/1000), days=Math.floor(total/86400), hours=Math.floor(total%86400/3600), mins=Math.floor(total%3600/60), secs=total%60;
@@ -230,11 +207,26 @@ if scan_mode is None:
         """
 <div class="card">
   <b>等待扫描</b><br><br>
-  根据倒计时提示点击对应扫描。14:30建立观察池，14:45复核，14:50后形成最终候选。
+  后台任务将在14:30建立观察池、14:45复核，并于14:52生成最终候选。按钮仍可用于手动补充对应节点。
 </div>
 """,
         unsafe_allow_html=True,
     )
+    today = datetime.now().date().isoformat()
+    stages = validation_store.staged_frame(today)
+    final = validation_store.final_frame(today)
+    if not final.empty:
+        st.markdown("## 今日综合最终结果")
+        final_display = final.rename(columns={
+            "code": "代码", "name": "名称", "composite_score": "综合分", "entry_price": "14:52信号价",
+            "score_1430": "14:30", "score_1445": "14:45", "score_1452": "14:52",
+            "appearances": "入选次数", "persistence": "持续性",
+        })
+        st.dataframe(final_display, hide_index=True, width="stretch")
+        st.success("该名单已自动纳入次日校验。")
+    elif not stages.empty:
+        completed_slots = "、".join(sorted(stages["slot"].unique()))
+        st.info(f"今日已完成节点：{completed_slots}；等待14:52生成最终名单。")
     st.stop()
 
 scan_mode_label = "严格标准" if scan_mode == "strict" else "理性流程"
@@ -242,65 +234,9 @@ st.caption(f"本次执行：{scan_mode_label}")
 
 try:
     with st.status("正在读取全市场快照…", expanded=True) as progress:
-        raw_spot = load_spot(use_demo)
-        spot = normalize_spot(raw_spot)
-        stage1, funnel = hard_filter(spot, cfg)
-        volume_ratio_missing = not stage1["volume_ratio"].notna().any()
-        analysis_limit = min(len(stage1), max(cfg.max_candidates, 80)) if volume_ratio_missing else cfg.max_candidates
-        selected = stage1.head(analysis_limit).copy()
-        progress.write(f"硬条件通过 {len(stage1)} 只；取前 {len(selected)} 只做日线与分时确认")
-
-        codes = selected["code"].tolist()
-        if use_demo:
-            daily_map = {code: demo_daily(code) for code in codes}
-            minute_map = {code: demo_minute(code) for code in codes}
-            errors = {}
-            concept_map = {"人工智能": codes[:3], "先进制造": codes[2:6]}
-            market_return = minute_return_pct(demo_index_minute())
-        else:
-            source = AkshareSource()
-            daily_map, daily_errors = parallel_fetch(codes, source.daily)
-            progress.write(f"日线完成 {len(daily_map)}/{len(codes)}")
-            # 新浪分钟接口内部使用 V8 解码器，macOS 下多线程并发可能触发进程级崩溃。
-            minute_map, minute_errors = parallel_fetch(codes, source.minute, max_workers=1)
-            progress.write(f"分时完成 {len(minute_map)}/{len(codes)}")
-            errors = {**daily_errors, **minute_errors}
-            try:
-                market_return = minute_return_pct(source.index_minute())
-            except Exception:
-                market_return = None
-                progress.write("大盘分时接口暂不可用，本轮“跑赢大盘”无法确认")
-            if "新浪" in str(raw_spot.attrs.get("provider", "")):
-                concept_map = {}
-                progress.write("当前使用新浪主链路，本轮热点题材暂不计分")
-            else:
-                try:
-                    concept_map = load_hot_concepts()
-                except Exception:
-                    concept_map = {}
-                    progress.write("热点板块接口暂不可用，本轮不计题材加分")
-
-        results = []
-        for row in selected.to_dict("records"):
-            code = row["code"]
-            if pd.isna(row.get("volume_ratio")) and code in daily_map:
-                row["volume_ratio"] = estimate_volume_ratio(row["volume"], daily_map[code])
-            if pd.isna(row.get("volume_ratio")):
-                row["volume_ratio"] = 0.0
-            row["min_volume_ratio"] = cfg.min_volume_ratio
-            if code in daily_map:
-                live_daily = merge_live_daily_bar(daily_map[code], row)
-                daily_result = analyze_daily(live_daily, mode=scan_mode)
-            else:
-                daily_result = {"volume_step": False, "ma_bull": False}
-            minute_result = (
-                analyze_minute(minute_map[code], cfg.min_vwap_ratio, market_return)
-                if code in minute_map
-                else {"vwap_strong": False, "relative_strong": False, "pullback_ok": False}
-            )
-            concepts = [name for name, members in concept_map.items() if code in members]
-            enriched = {**row, **daily_result, **minute_result, "hot_concepts": concepts}
-            results.append(finalize_candidate(enriched))
+        scan_result = run_market_scan(
+            cfg, mode=scan_mode, use_demo=use_demo, progress=progress.write,
+        )
         progress.update(label="扫描完成", state="complete", expanded=False)
 except (MarketDataError, ValueError, ConnectionError) as exc:
     st.error(f"本次行情读取失败：{exc}")
@@ -311,33 +247,45 @@ except Exception as exc:
     st.info("请稍后重试，或切换演示数据确认本地程序运行正常。")
     st.stop()
 
-if results:
-    result_df = pd.DataFrame(results).sort_values(["passed", "score"], ascending=[False, False])
-    result_df["strategy_rank"] = range(1, len(result_df) + 1)
-else:
-    result_df = pd.DataFrame(
-        columns=[
-            "strategy_rank", "passed", "status", "code", "name", "score", "change_pct", "volume_ratio",
-            "turnover", "float_cap_yi", "volume_step", "ma_bull", "vwap_strong",
-            "relative_strong", "pullback_ok", "hot_concepts", "failed_reasons", "rank_reason",
-        ]
-    )
+result_df = scan_result.result_frame
+funnel = scan_result.funnel
+errors = scan_result.errors
 passed = result_df[result_df["passed"] == True]  # noqa: E712
 
 scan_now = datetime.now()
 if scan_mode == "rational" and not use_demo and time(14, 30) <= scan_now.time() <= time(15, 0):
-    frozen = validation_store.freeze_scan(
+    if scan_now.time() < time(14, 45):
+        slot = "1430"
+    elif scan_now.time() < time(14, 52):
+        slot = "1445"
+    else:
+        slot = "1452"
+    validation_store.save_staged_scan(
+        slot=slot,
         scanned_at=scan_now,
-        provider=str(raw_spot.attrs.get("provider", "免费行情")),
+        provider=scan_result.provider,
         market_count=funnel["全市场"],
-        hard_count=len(stage1),
+        hard_count=scan_result.hard_count,
         config=cfg.as_dict(),
         candidates=passed.to_dict("records"),
     )
-    if frozen:
-        st.success(f"已冻结今日候选 {len(passed)} 只，次一交易日 9:45 和 10:30 分阶段校验。")
+    if slot == "1452":
+        frozen = validation_store.finalize_staged_day(scan_now.date().isoformat())
+        final = validation_store.final_frame(scan_now.date().isoformat())
+        if frozen:
+            st.success(f"14:52综合名单已冻结 {len(final)} 只，并纳入次日校验。")
+        else:
+            st.caption("今日综合最终名单已经生成，本次扫描不会改写历史记录。")
+        if not final.empty:
+            st.markdown("## 三时点综合最终结果")
+            final_display = final.rename(columns={
+                "code": "代码", "name": "名称", "composite_score": "综合分", "entry_price": "14:52信号价",
+                "score_1430": "14:30", "score_1445": "14:45", "score_1452": "14:52",
+                "appearances": "入选次数", "persistence": "持续性",
+            })
+            st.dataframe(final_display, hide_index=True, width="stretch")
     else:
-        st.caption("今日候选已在首次扫描时冻结，本次刷新不会改写历史记录。")
+        st.success(f"已保存 {slot[:2]}:{slot[2:]} 候选 {len(passed)} 只，等待后续节点确认。")
 elif scan_mode == "strict" and not use_demo:
     st.caption("严格标准扫描用于同时点对照，不写入次日校验档案。")
 elif not use_demo:
@@ -345,7 +293,7 @@ elif not use_demo:
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("全市场", f"{funnel['全市场']:,}")
-m2.metric("硬条件通过", len(stage1))
+m2.metric("硬条件通过", scan_result.hard_count)
 m3.metric("深度确认", len(result_df))
 m4.metric("最终候选", len(passed), delta="宁缺毋滥")
 

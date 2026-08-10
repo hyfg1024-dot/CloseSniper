@@ -61,6 +61,41 @@ class ValidationTests(unittest.TestCase):
         self.assertFalse(second)
         self.assertEqual(len(self.store.validation_frame()), 1)
 
+    def test_three_stage_result_uses_1452_gate_and_weighted_score(self):
+        def candidate(code: str, score: float, price: float = 10.0):
+            return {
+                "code": code, "name": f"股票{code}", "price": price, "score": score,
+                "change_pct": 4.0, "volume_ratio": 1.5, "turnover": 7.0,
+                "float_cap_yi": 100,
+            }
+
+        common = dict(provider="测试", market_count=5000, hard_count=20, config={})
+        self.store.save_staged_scan(
+            slot="1430", scanned_at=datetime(2026, 8, 3, 14, 30),
+            candidates=[candidate("600001", 80), candidate("600009", 95)], **common,
+        )
+        self.store.save_staged_scan(
+            slot="1445", scanned_at=datetime(2026, 8, 3, 14, 45),
+            candidates=[candidate("600001", 85), candidate("600002", 78)], **common,
+        )
+        self.store.save_staged_scan(
+            slot="1452", scanned_at=datetime(2026, 8, 3, 14, 52),
+            candidates=[candidate("600001", 90, 10.5), candidate("600002", 88, 20.0), candidate("600003", 92, 30.0)],
+            **common,
+        )
+
+        self.assertTrue(self.store.finalize_staged_day("2026-08-03"))
+        self.assertFalse(self.store.finalize_staged_day("2026-08-03"))
+        final = self.store.final_frame("2026-08-03").set_index("code")
+        self.assertNotIn("600009", final.index)
+        self.assertAlmostEqual(final.loc["600001", "composite_score"], 86.5)
+        self.assertAlmostEqual(final.loc["600002", "composite_score"], 67.4)
+        self.assertAlmostEqual(final.loc["600003", "composite_score"], 46.0)
+        self.assertEqual(final.loc["600001", "persistence"], "三次稳定")
+        self.assertEqual(final.loc["600002", "persistence"], "连续两次")
+        self.assertEqual(final.loc["600003", "persistence"], "14:52新进入")
+        self.assertEqual(len(self.store.validation_frame()), 3)
+
     def test_validation_separates_open_0945_and_1030(self):
         self.store.freeze_scan(
             scanned_at=datetime(2026, 7, 31, 14, 35),
