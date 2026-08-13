@@ -7,6 +7,7 @@ import pandas as pd
 
 from src.validation_service import capture_open_pending, validate_pending
 from src.validation_store import ValidationStore
+from src.validation_ui import _return_color
 
 
 def minute_frame(day: str, start: float, periods: int = 61) -> pd.DataFrame:
@@ -40,6 +41,12 @@ class ValidationTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_return_color_uses_a_share_red_up_green_down(self):
+        self.assertIn("#c92f2f", _return_color(1.2))
+        self.assertIn("#16835d", _return_color(-0.8))
+        self.assertIn("#656b66", _return_color(0))
+        self.assertEqual(_return_color(float("nan")), "")
 
     def test_first_scan_is_frozen(self):
         candidate = {

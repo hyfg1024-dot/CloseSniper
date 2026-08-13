@@ -128,8 +128,18 @@ def render_validation_page(store: ValidationStore) -> None:
             "60分钟回撤%", "指数10:30%", "15分钟命中", "60分钟命中",
             "9:45跑赢", "10:30跑赢",
         ]
+        return_columns = [
+            "9:30收益%", "抓取时收益%", "9:45收益%", "10:30收益%",
+            "15分钟最高%", "60分钟最高%", "60分钟回撤%", "指数10:30%",
+        ]
+        styled_display = (
+            display[columns]
+            .style
+            .map(_return_color, subset=return_columns)
+            .format({column: "{:.2f}" for column in return_columns}, na_rep="—")
+        )
         st.dataframe(
-            display[columns],
+            styled_display,
             hide_index=True,
             width="stretch",
             column_config={
@@ -233,6 +243,21 @@ def _render_definition() -> None:
 def _positive_rate(series: pd.Series) -> float | None:
     values = series.dropna()
     return float((values > 0).mean() * 100) if not values.empty else None
+
+
+def _return_color(value: object) -> str:
+    """A股行情配色：上涨红、下跌绿，零值与缺失保持中性。"""
+    if pd.isna(value):
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if number > 0:
+        return "color:#c92f2f;background-color:rgba(201,47,47,.10);font-weight:700"
+    if number < 0:
+        return "color:#16835d;background-color:rgba(22,131,93,.10);font-weight:700"
+    return "color:#656b66;font-weight:600"
 
 
 def _beats_index(returns: pd.Series, index_returns: pd.Series) -> pd.Series:
