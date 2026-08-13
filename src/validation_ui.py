@@ -186,25 +186,52 @@ def render_history_page(store: ValidationStore) -> None:
         )
         .sort_values("signal_date")
     )
+    # 使用离散交易日轴，避免 Plotly 在日期之间自动插入 06:00 / 12:00 等时间刻度。
+    daily["交易日"] = pd.to_datetime(daily["signal_date"]).dt.strftime("%m-%d")
     figure = go.Figure()
     figure.add_trace(
-        go.Scatter(x=daily["signal_date"], y=daily["open_return"], name="9:30平均收益", line={"color": "#f05a28", "width": 3})
+        go.Scatter(
+            x=daily["交易日"], y=daily["open_return"], name="9:30 开盘",
+            mode="lines+markers",
+            line={"color": "#ed3f2b", "width": 5, "dash": "solid"},
+            marker={"color": "#ed3f2b", "size": 10, "symbol": "circle", "line": {"color": "#f3f0e6", "width": 2}},
+            hovertemplate="交易日 %{x}<br>9:30平均涨跌 %{y:+.2f}%<extra></extra>",
+        )
     )
     figure.add_trace(
-        go.Scatter(x=daily["signal_date"], y=daily["return_0945"], name="9:45平均收益", line={"color": "#315b45", "width": 3})
+        go.Scatter(
+            x=daily["交易日"], y=daily["return_0945"], name="9:45 复核",
+            mode="lines+markers",
+            line={"color": "#07836f", "width": 3, "dash": "dash"},
+            marker={"color": "#07836f", "size": 11, "symbol": "diamond", "line": {"color": "#f3f0e6", "width": 2}},
+            hovertemplate="交易日 %{x}<br>9:45平均涨跌 %{y:+.2f}%<extra></extra>",
+        )
     )
     figure.add_trace(
-        go.Scatter(x=daily["signal_date"], y=daily["return_1030"], name="10:30平均收益", line={"color": "#172033", "width": 3})
+        go.Scatter(
+            x=daily["交易日"], y=daily["return_1030"], name="10:30 延续",
+            mode="lines+markers",
+            line={"color": "#2554c7", "width": 4, "dash": "dot"},
+            marker={"color": "#2554c7", "size": 11, "symbol": "square", "line": {"color": "#f3f0e6", "width": 2}},
+            hovertemplate="交易日 %{x}<br>10:30平均涨跌 %{y:+.2f}%<extra></extra>",
+        )
     )
-    figure.add_hline(y=0, line_color="#8f918a", line_dash="dot")
+    figure.add_hline(y=0, line_color="#6f756e", line_width=1.5, line_dash="dot")
     figure.update_layout(
-        height=380,
-        margin=dict(l=10, r=10, t=20, b=10),
+        height=410,
+        margin=dict(l=12, r=12, t=54, b=14),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(255,255,255,.25)",
-        yaxis_title="收益率 (%)",
+        yaxis_title="平均涨跌幅 (%)",
         xaxis_title=None,
-        legend={"orientation": "h", "y": 1.08},
+        xaxis={"type": "category", "categoryorder": "array", "categoryarray": daily["交易日"].tolist(), "gridcolor": "rgba(23,33,28,.06)"},
+        yaxis={"gridcolor": "rgba(23,33,28,.10)", "zeroline": False, "ticksuffix": "%"},
+        legend={
+            "orientation": "h", "y": 1.14, "x": 0,
+            "font": {"size": 13, "color": "#17211c"},
+            "itemsizing": "constant",
+        },
+        hovermode="x unified",
     )
     st.plotly_chart(figure, width="stretch", config={"displayModeBar": False})
 
