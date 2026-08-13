@@ -7,7 +7,7 @@ import pandas as pd
 
 from src.validation_service import capture_open_pending, validate_pending
 from src.validation_store import ValidationStore
-from src.validation_ui import _return_color
+from src.validation_ui import _format_return, _return_color
 
 
 def minute_frame(day: str, start: float, periods: int = 61) -> pd.DataFrame:
@@ -47,6 +47,12 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("#16835d", _return_color(-0.8))
         self.assertIn("#656b66", _return_color(0))
         self.assertEqual(_return_color(float("nan")), "")
+
+    def test_return_format_includes_direction_and_unit(self):
+        self.assertEqual(_format_return(1.234), "+1.23%")
+        self.assertEqual(_format_return(-0.8), "-0.80%")
+        self.assertEqual(_format_return(0), "0.00%")
+        self.assertEqual(_format_return(float("nan")), "—")
 
     def test_first_scan_is_frozen(self):
         candidate = {

@@ -112,46 +112,36 @@ def render_validation_page(store: ValidationStore) -> None:
                 "name": "名称", "entry_price": "信号价", "score": "综合评分",
                 "score_1430": "14:30评分", "score_1445": "14:45评分",
                 "score_1452": "14:52评分", "persistence": "持续性",
-                "open_return": "9:30收益%", "captured_return": "抓取时收益%",
-                "open_captured_at": "开盘抓取时间", "return_0945": "9:45收益%",
-                "return_1030": "10:30收益%",
-                "max_return": "15分钟最高%", "max_drawdown": "15分钟回撤%",
-                "max_return_1030": "60分钟最高%", "max_drawdown_1030": "60分钟回撤%",
-                "index_0945_return": "指数9:45%", "index_1030_return": "指数10:30%",
+                "open_return": "9:30涨跌", "captured_return": "抓取时涨跌",
+                "open_captured_at": "抓取时间", "return_0945": "9:45涨跌",
+                "return_1030": "10:30涨跌",
+                "max_return": "15分钟最高涨幅", "max_drawdown": "15分钟最低涨跌",
+                "max_return_1030": "60分钟最高涨幅", "max_drawdown_1030": "60分钟最低涨跌",
+                "index_0945_return": "指数9:45涨跌", "index_1030_return": "指数10:30涨跌",
             }
         )
         columns = [
             "信号日", "校验日", "代码", "名称", "综合评分", "持续性",
-            "14:30评分", "14:45评分", "14:52评分", "信号价", "9:30收益%",
-            "抓取时收益%", "开盘抓取时间", "9:45收益%", "10:30收益%",
-            "15分钟最高%", "60分钟最高%",
-            "60分钟回撤%", "指数10:30%", "15分钟命中", "60分钟命中",
+            "14:30评分", "14:45评分", "14:52评分", "信号价", "9:30涨跌",
+            "抓取时涨跌", "抓取时间", "9:45涨跌", "10:30涨跌",
+            "15分钟最高涨幅", "60分钟最高涨幅",
+            "60分钟最低涨跌", "指数10:30涨跌", "15分钟命中", "60分钟命中",
             "9:45跑赢", "10:30跑赢",
         ]
         return_columns = [
-            "9:30收益%", "抓取时收益%", "9:45收益%", "10:30收益%",
-            "15分钟最高%", "60分钟最高%", "60分钟回撤%", "指数10:30%",
+            "9:30涨跌", "抓取时涨跌", "9:45涨跌", "10:30涨跌",
+            "15分钟最高涨幅", "60分钟最高涨幅", "60分钟最低涨跌", "指数10:30涨跌",
         ]
         styled_display = (
             display[columns]
             .style
             .map(_return_color, subset=return_columns)
-            .format({column: "{:.2f}" for column in return_columns}, na_rep="—")
+            .format({column: _format_return for column in return_columns}, na_rep="—")
         )
         st.dataframe(
             styled_display,
             hide_index=True,
             width="stretch",
-            column_config={
-                "9:30收益%": st.column_config.NumberColumn(format="%.2f"),
-                "抓取时收益%": st.column_config.NumberColumn(format="%.2f"),
-                "9:45收益%": st.column_config.NumberColumn(format="%.2f"),
-                "10:30收益%": st.column_config.NumberColumn(format="%.2f"),
-                "15分钟最高%": st.column_config.NumberColumn(format="%.2f"),
-                "60分钟最高%": st.column_config.NumberColumn(format="%.2f"),
-                "60分钟回撤%": st.column_config.NumberColumn(format="%.2f"),
-                "指数10:30%": st.column_config.NumberColumn(format="%.2f"),
-            },
         )
     _render_definition()
 
@@ -258,6 +248,17 @@ def _return_color(value: object) -> str:
     if number < 0:
         return "color:#16835d;background-color:rgba(22,131,93,.10);font-weight:700"
     return "color:#656b66;font-weight:600"
+
+
+def _format_return(value: object) -> str:
+    """将涨跌幅显示为带方向符号和百分号的行情格式。"""
+    if pd.isna(value):
+        return "—"
+    try:
+        number = float(value)
+        return "0.00%" if number == 0 else f"{number:+.2f}%"
+    except (TypeError, ValueError):
+        return "—"
 
 
 def _beats_index(returns: pd.Series, index_returns: pd.Series) -> pd.Series:
