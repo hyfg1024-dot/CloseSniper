@@ -19,7 +19,7 @@ class AkshareSource:
         try:
             import akshare as ak
         except ImportError as exc:
-            raise MarketDataError("尚未安装 AKShare，请双击“启动尾盘雷达.command”完成安装") from exc
+            raise MarketDataError("尚未安装 AKShare，请双击桌面的“尾盘狙击 CloseSniper.command”完成安装") from exc
         self.ak = ak
 
     @staticmethod

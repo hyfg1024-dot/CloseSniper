@@ -20,7 +20,7 @@ from src.validation_store import ValidationStore
 from src.validation_ui import render_history_page, render_validation_page
 
 
-st.set_page_config(page_title="尾盘雷达", page_icon="◉", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="尾盘狙击 · CloseSniper", page_icon="◉", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown(
     """
@@ -191,8 +191,8 @@ with st.sidebar.expander("排除规则"):
 st.markdown(
     f"""
 <section class="hero">
-  <div class="eyebrow">Close Auction Signal Desk · A-Shares</div>
-  <h1>尾盘雷达</h1>
+  <div class="eyebrow">CloseSniper · A-Share Closing Scanner</div>
+  <h1>尾盘狙击</h1>
   <p>把全市场噪声压缩成少数可复核的尾盘候选。硬条件先过筛，再确认量价、均线、分时强度与热点题材。</p>
   <span class="badge live">{status}</span><span class="badge">{datetime.now():%Y-%m-%d %H:%M}</span>
   <span class="badge">免费行情 · 新浪 / 腾讯 / AKShare</span>
@@ -371,7 +371,7 @@ display = display.rename(
 cols = ["策略排名", "结论", "代码", "名称", "匹配度", "主要优势", "涨幅%", "量比", "换手率%", "流通市值(亿)", "阶梯放量", "均线通过", "分时强势", "跑赢大盘", "回踩有效", "题材", "未通过项"]
 st.dataframe(display[cols], hide_index=True, width="stretch")
 csv = display[cols].to_csv(index=False).encode("utf-8-sig")
-st.download_button("导出本次结果 CSV", csv, file_name=f"尾盘雷达_{scan_mode_label}_{datetime.now():%Y%m%d_%H%M}.csv", mime="text/csv")
+st.download_button("导出本次结果 CSV", csv, file_name=f"CloseSniper_{scan_mode_label}_{datetime.now():%Y%m%d_%H%M}.csv", mime="text/csv")
 
 if errors:
     with st.expander(f"数据缺失记录（{len(errors)}）"):

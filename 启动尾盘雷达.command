@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "$LAUNCHER_PATH")" && pwd)"
 cd "$SCRIPT_DIR"
 
 if curl -fsS http://127.0.0.1:8501/_stcore/health >/dev/null 2>&1; then
-  echo "尾盘雷达已在运行，正在打开页面…"
+  echo "尾盘狙击 CloseSniper 已在运行，正在打开页面…"
   open http://127.0.0.1:8501
   exit 0
 fi
@@ -38,5 +38,5 @@ if ! python -c "import streamlit, akshare, pandas, numpy, plotly" >/dev/null 2>&
   python -m pip install --quiet -r requirements.txt
 fi
 
-echo "尾盘雷达即将打开。关闭此窗口即可停止程序。"
+echo "尾盘狙击 CloseSniper 即将打开。关闭此窗口即可停止程序。"
 python -m streamlit run app.py --server.address 127.0.0.1 --server.headless false --browser.gatherUsageStats false
