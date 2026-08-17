@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -9,13 +11,23 @@ from typing import Any, Iterable
 import pandas as pd
 
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "panpanc.db"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+APP_SUPPORT_ROOT = Path(
+    os.getenv(
+        "CLOSESNIPER_HOME",
+        str(Path.home() / "Library" / "Application Support" / "CloseSniper"),
+    )
+)
+DEFAULT_DB_PATH = APP_SUPPORT_ROOT / "data" / "closesniper.db"
+LEGACY_DB_PATH = PROJECT_ROOT / "data" / "panpanc.db"
 
 
 class ValidationStore:
     def __init__(self, path: str | Path = DEFAULT_DB_PATH) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path == DEFAULT_DB_PATH and not self.path.exists() and LEGACY_DB_PATH.exists():
+            shutil.copy2(LEGACY_DB_PATH, self.path)
         self._init_schema()
 
     def connect(self) -> sqlite3.Connection:

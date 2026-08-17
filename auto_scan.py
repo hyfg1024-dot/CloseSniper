@@ -7,6 +7,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from src.data_source import AkshareSource
 from src.scan_service import derive_strict_frame, run_market_scan
 from src.strategy import StrategyConfig
 from src.validation_store import ValidationStore
@@ -14,8 +15,19 @@ from src.validation_store import ValidationStore
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--slot", required=True, choices=("1430", "1445", "1452"))
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--slot", choices=("1430", "1445", "1452"))
+    group.add_argument("--healthcheck", action="store_true")
     args = parser.parse_args()
+    if args.healthcheck:
+        store = ValidationStore()
+        with store.connect() as db:
+            db.execute("SELECT 1").fetchone()
+        spot = AkshareSource().spot()
+        print(json.dumps({
+            "status": "ok", "database": str(store.path), "market_rows": len(spot),
+        }, ensure_ascii=False))
+        return
     now = datetime.now()
     if now.weekday() >= 5:
         print(json.dumps({"status": "skipped", "reason": "weekend"}, ensure_ascii=False))

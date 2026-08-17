@@ -2,13 +2,20 @@
 from __future__ import annotations
 
 import plistlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 
-VALIDATION_LABEL = "com.panpanc.daily-validation"
+VALIDATION_LABEL = "com.closesniper.daily-validation"
 SCAN_SLOTS = {"1430": (14, 30), "1445": (14, 45), "1452": (14, 52)}
+LEGACY_LABELS = [
+    "com.panpanc.daily-validation",
+    "com.panpanc.tail-scan-1430",
+    "com.panpanc.tail-scan-1445",
+    "com.panpanc.tail-scan-1452",
+]
 
 
 def install_agent(domain: str, plist_path: Path, label: str, payload: dict) -> None:
@@ -21,14 +28,49 @@ def install_agent(domain: str, plist_path: Path, label: str, payload: dict) -> N
 
 def main() -> None:
     project = Path(sys.argv[1]).resolve()
-    python = project / ".venv" / "bin" / "python"
-    validator = project / "validate.py"
-    scanner = project / "auto_scan.py"
+    source_python = project / ".venv" / "bin" / "python"
+    if not source_python.exists():
+        raise SystemExit("请先双击尾盘狙击 CloseSniper，完成运行环境安装。")
+
+    install_dir = Path.home() / "Library" / "Application Support" / "CloseSniper"
+    data_dir = install_dir / "data"
+    log_dir = install_dir / "logs"
+    install_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    subprocess.run(
+        [
+            "rsync", "-a", "--delete",
+            "--exclude", ".git/", "--exclude", "data/", "--exclude", "logs/",
+            "--exclude", "__pycache__/", "--exclude", ".pytest_cache/",
+            f"{project}/", f"{install_dir}/",
+        ],
+        check=True,
+    )
+    legacy_db = project / "data" / "panpanc.db"
+    deployed_db = data_dir / "closesniper.db"
+    if not deployed_db.exists() and legacy_db.exists():
+        shutil.copy2(legacy_db, deployed_db)
+
+    python = install_dir / ".venv" / "bin" / "python"
+    validator = install_dir / "validate.py"
+    scanner = install_dir / "auto_scan.py"
     if not python.exists():
-        raise SystemExit("请先双击启动尾盘雷达，完成运行环境安装。")
+        raise SystemExit("后台运行环境部署失败：未找到Application Support中的Python。")
 
     agent_dir = Path.home() / "Library" / "LaunchAgents"
     agent_dir.mkdir(parents=True, exist_ok=True)
+    domain = f"gui/{subprocess.check_output(['id', '-u'], text=True).strip()}"
+    for legacy_label in LEGACY_LABELS:
+        legacy_path = agent_dir / f"{legacy_label}.plist"
+        subprocess.run(
+            ["launchctl", "bootout", domain, str(legacy_path)],
+            check=False,
+            capture_output=True,
+        )
+        legacy_path.unlink(missing_ok=True)
+
     plist_path = agent_dir / f"{VALIDATION_LABEL}.plist"
     intervals = [
         {"Weekday": weekday, "Hour": hour, "Minute": minute}
@@ -38,33 +80,35 @@ def main() -> None:
     payload = {
         "Label": VALIDATION_LABEL,
         "ProgramArguments": [str(python), str(validator)],
-        "WorkingDirectory": str(project),
+        "WorkingDirectory": str(install_dir),
+        "EnvironmentVariables": {"CLOSESNIPER_HOME": str(install_dir), "PYTHONUNBUFFERED": "1"},
         "StartCalendarInterval": intervals,
-        "StandardOutPath": "/tmp/panpanc-validation.log",
-        "StandardErrorPath": "/tmp/panpanc-validation-error.log",
+        "StandardOutPath": str(log_dir / "validation.log"),
+        "StandardErrorPath": str(log_dir / "validation-error.log"),
         "ProcessType": "Background",
     }
-    domain = f"gui/{subprocess.check_output(['id', '-u'], text=True).strip()}"
     install_agent(domain, plist_path, VALIDATION_LABEL, payload)
 
     for slot, (hour, minute) in SCAN_SLOTS.items():
-        label = f"com.panpanc.tail-scan-{slot}"
+        label = f"com.closesniper.tail-scan-{slot}"
         scan_plist = agent_dir / f"{label}.plist"
         scan_payload = {
             "Label": label,
             "ProgramArguments": [str(python), str(scanner), "--slot", slot],
-            "WorkingDirectory": str(project),
+            "WorkingDirectory": str(install_dir),
+            "EnvironmentVariables": {"CLOSESNIPER_HOME": str(install_dir), "PYTHONUNBUFFERED": "1"},
             "StartCalendarInterval": [
                 {"Weekday": weekday, "Hour": hour, "Minute": minute}
                 for weekday in range(2, 7)
             ],
-            "StandardOutPath": f"/tmp/panpanc-scan-{slot}.log",
-            "StandardErrorPath": f"/tmp/panpanc-scan-{slot}-error.log",
+            "StandardOutPath": str(log_dir / f"scan-{slot}.log"),
+            "StandardErrorPath": str(log_dir / f"scan-{slot}-error.log"),
             "ProcessType": "Background",
         }
         install_agent(domain, scan_plist, label, scan_payload)
 
-    print("已安装：工作日 14:30、14:45、14:52 自动扫描；09:45、10:30 自动校验。")
+    print(f"后台环境：{install_dir}")
+    print("已安装：工作日14:30、14:45静默采样，14:52生成严格与理性两套结果；09:45、10:30自动校验。")
 
 
 if __name__ == "__main__":
