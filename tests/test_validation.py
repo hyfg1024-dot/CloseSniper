@@ -109,6 +109,21 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(final.loc["600003", "persistence"], "14:52新进入")
         self.assertEqual(len(self.store.validation_frame()), 3)
 
+    def test_final_result_requires_all_three_slots(self):
+        candidate = {
+            "code": "600001", "name": "测试", "price": 10.0, "score": 90,
+            "change_pct": 4.0, "volume_ratio": 1.5, "turnover": 7.0,
+            "float_cap_yi": 100,
+        }
+        self.store.save_staged_scan(
+            slot="1452", scanned_at=datetime(2026, 8, 3, 14, 52),
+            provider="测试", market_count=5000, hard_count=20,
+            config={}, candidates=[candidate],
+        )
+
+        self.assertFalse(self.store.finalize_staged_day("2026-08-03"))
+        self.assertTrue(self.store.final_frame("2026-08-03").empty)
+
     def test_strict_daily_result_keeps_latest_slot_under_its_own_mode(self):
         common = dict(provider="测试")
         self.store.save_strict_scan(
@@ -122,6 +137,10 @@ class ValidationTests(unittest.TestCase):
         latest = self.store.latest_strict_frame("2026-08-03")
         self.assertEqual(latest.iloc[0]["slot"], "1452")
         self.assertEqual(latest.iloc[0]["code"], "600002")
+
+        all_slots = self.store.strict_frame("2026-08-03")
+        self.assertEqual(all_slots["slot"].tolist(), ["1430", "1452"])
+        self.assertEqual(all_slots["code"].tolist(), ["600001", "600002"])
 
     def test_validation_separates_open_0945_and_1030(self):
         self.store.freeze_scan(

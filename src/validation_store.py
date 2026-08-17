@@ -215,6 +215,15 @@ class ValidationStore:
     def finalize_staged_day(self, trade_date: str) -> bool:
         """以14:52候选为门槛生成最终名单；返回 True 表示首次生成。"""
         with self.connect() as db:
+            completed_slots = {
+                str(row["slot"])
+                for row in db.execute(
+                    "SELECT slot FROM staged_scans WHERE trade_date=?",
+                    (trade_date,),
+                ).fetchall()
+            }
+            if completed_slots != {"1430", "1445", "1452"}:
+                return False
             final_stage = db.execute(
                 "SELECT * FROM staged_scans WHERE trade_date=? AND slot='1452'", (trade_date,)
             ).fetchone()
@@ -344,6 +353,17 @@ class ValidationStore:
         """
         with self.connect() as db:
             return pd.read_sql_query(query, db, params=(trade_date, trade_date))
+
+    def strict_frame(self, trade_date: str) -> pd.DataFrame:
+        query = """
+            SELECT ss.trade_date, ss.slot, ss.scanned_at, c.code, c.name, c.entry_price, c.score
+            FROM strict_scans ss
+            LEFT JOIN strict_candidates c ON c.strict_scan_id=ss.id
+            WHERE ss.trade_date=?
+            ORDER BY ss.slot, c.score DESC
+        """
+        with self.connect() as db:
+            return pd.read_sql_query(query, db, params=(trade_date,))
 
     def latest_rational_frame(self, trade_date: str) -> pd.DataFrame:
         final = self.final_frame(trade_date)

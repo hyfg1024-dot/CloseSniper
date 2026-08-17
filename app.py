@@ -181,6 +181,65 @@ def render_daily_result_panel(container, title: str, frame: pd.DataFrame, note: 
         st.dataframe(display, hide_index=True, width="stretch")
 
 
+def _slot_frame(frame: pd.DataFrame, slot: str) -> pd.DataFrame:
+    if frame.empty or "slot" not in frame:
+        return pd.DataFrame()
+    return frame[frame["slot"].astype(str) == slot].copy()
+
+
+def render_daily_timeline(
+    *,
+    strict_frame: pd.DataFrame,
+    rational_frame: pd.DataFrame,
+    final_frame: pd.DataFrame,
+) -> None:
+    st.markdown("## 今日三时点结果")
+    st.caption("每一列都是当时冻结的原始快照；不会用后一个时点的数据覆盖前一个时点。")
+
+    st.markdown("### 严格标准")
+    strict_columns = st.columns(3)
+    for column, slot in zip(strict_columns, ("1430", "1445", "1452"), strict=True):
+        render_daily_result_panel(
+            column,
+            f"{slot[:2]}:{slot[2:]}",
+            _slot_frame(strict_frame, slot),
+            "该时点严格标准原始结果。",
+        )
+
+    st.markdown("### 理性流程")
+    rational_columns = st.columns(3)
+    for column, slot in zip(rational_columns, ("1430", "1445", "1452"), strict=True):
+        render_daily_result_panel(
+            column,
+            f"{slot[:2]}:{slot[2:]}",
+            _slot_frame(rational_frame, slot),
+            "该时点理性流程原始结果。",
+        )
+
+    st.markdown("### 加权后的最终结果")
+    final_container = st.container(border=True)
+    completed_slots = (
+        set(rational_frame["slot"].astype(str))
+        if not rational_frame.empty and "slot" in rational_frame
+        else set()
+    )
+    missing_slots = [slot for slot in ("1430", "1445", "1452") if slot not in completed_slots]
+    if missing_slots:
+        missing_text = "、".join(f"{slot[:2]}:{slot[2:]}" for slot in missing_slots)
+        with final_container:
+            st.info(f"尚未生成加权结果：等待 {missing_text} 原始节点完成。")
+    elif final_frame.empty:
+        with final_container:
+            st.warning("14:52节点已执行，加权完成，最终符合条件 0 只。")
+    else:
+        render_daily_result_panel(
+            final_container,
+            "三时点加权名单",
+            final_frame,
+            "20% × 14:30评分 + 30% × 14:45评分 + 50% × 14:52评分；只有14:52仍入选的股票进入最终名单。",
+        )
+
+
 cfg = make_config()
 status, status_note = market_session_status()
 st.sidebar.markdown("---")
@@ -230,24 +289,15 @@ st.markdown(
 strict_col, rational_col = st.columns(2)
 strict_run = strict_col.button("严格标准扫描", width="stretch", help="完全按初始均线标准执行")
 rational_run = rational_col.button("理性流程扫描（推荐）", type="primary", width="stretch", help="包含当日临时日K与分阶段复核")
-strict_panel = strict_col.container(border=True)
-rational_panel = rational_col.container(border=True)
 scan_mode = "strict" if strict_run else "rational" if rational_run else None
 if scan_mode is None:
     today = datetime.now().date().isoformat()
-    render_daily_result_panel(
-        strict_panel,
-        "严格标准",
-        validation_store.latest_strict_frame(today),
-        "同一时点严格均线筛选，仅用于两种方法对照。",
+    render_daily_timeline(
+        strict_frame=validation_store.strict_frame(today),
+        rational_frame=validation_store.staged_frame(today),
+        final_frame=validation_store.final_frame(today),
     )
-    render_daily_result_panel(
-        rational_panel,
-        "理性流程",
-        validation_store.latest_rational_frame(today),
-        "14:52后显示三时点综合名单，并自动进入次日校验。",
-    )
-    st.caption("后台任务将在14:30、14:45和14:52自动更新上方两个结果区。")
+    st.caption("后台任务将在14:30、14:45和14:52依次写入三个原始结果区，14:52后生成加权最终结果。")
     st.stop()
 
 scan_mode_label = "严格标准" if scan_mode == "strict" else "理性流程"
@@ -312,17 +362,18 @@ elif not use_demo:
     st.caption("当前不在 14:30–15:00 策略窗口，本次结果仅供查看，不写入次日校验档案。")
 
 today = scan_now.date().isoformat()
-strict_panel_frame = passed if scan_mode == "strict" else validation_store.latest_strict_frame(today)
-if scan_mode == "rational" and in_scan_window and slot == "1452" and not use_demo:
-    rational_panel_frame = validation_store.final_frame(today)
+if not use_demo and in_scan_window:
+    render_daily_timeline(
+        strict_frame=validation_store.strict_frame(today),
+        rational_frame=validation_store.staged_frame(today),
+        final_frame=validation_store.final_frame(today),
+    )
 else:
-    rational_panel_frame = passed if scan_mode == "rational" else validation_store.latest_rational_frame(today)
-render_daily_result_panel(
-    strict_panel, "严格标准", strict_panel_frame, "同一时点严格均线筛选，仅用于两种方法对照。"
-)
-render_daily_result_panel(
-    rational_panel, "理性流程", rational_panel_frame, "14:52综合结果自动进入次日校验。"
-)
+    demo_container = st.container(border=True)
+    render_daily_result_panel(
+        demo_container, f"{scan_mode_label} · 本次预览", passed,
+        "演示数据或非尾盘时段的预览，不写入每日三时点记录。",
+    )
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("全市场", f"{funnel['全市场']:,}")
