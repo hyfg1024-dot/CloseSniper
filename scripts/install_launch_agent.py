@@ -10,6 +10,7 @@ from pathlib import Path
 
 VALIDATION_LABEL = "com.closesniper.daily-validation"
 SCAN_SLOTS = {"1430": (14, 30), "1445": (14, 45), "1452": (14, 52)}
+LAUNCHD_WEEKDAYS = range(1, 6)  # launchd: Sunday=0/7, Monday=1, Friday=5
 LEGACY_LABELS = [
     "com.panpanc.daily-validation",
     "com.panpanc.tail-scan-1430",
@@ -24,6 +25,13 @@ def install_agent(domain: str, plist_path: Path, label: str, payload: dict) -> N
     subprocess.run(["launchctl", "bootout", domain, str(plist_path)], check=False, capture_output=True)
     subprocess.run(["launchctl", "bootstrap", domain, str(plist_path)], check=True)
     subprocess.run(["launchctl", "enable", f"{domain}/{label}"], check=True)
+
+
+def weekday_intervals(hour: int, minute: int) -> list[dict[str, int]]:
+    return [
+        {"Weekday": weekday, "Hour": hour, "Minute": minute}
+        for weekday in LAUNCHD_WEEKDAYS
+    ]
 
 
 def main() -> None:
@@ -72,11 +80,7 @@ def main() -> None:
         legacy_path.unlink(missing_ok=True)
 
     plist_path = agent_dir / f"{VALIDATION_LABEL}.plist"
-    intervals = [
-        {"Weekday": weekday, "Hour": hour, "Minute": minute}
-        for weekday in range(2, 7)
-        for hour, minute in ((9, 45), (10, 30))
-    ]
+    intervals = weekday_intervals(9, 45) + weekday_intervals(10, 30)
     payload = {
         "Label": VALIDATION_LABEL,
         "ProgramArguments": [str(python), str(validator)],
@@ -97,10 +101,7 @@ def main() -> None:
             "ProgramArguments": [str(python), str(scanner), "--slot", slot],
             "WorkingDirectory": str(install_dir),
             "EnvironmentVariables": {"CLOSESNIPER_HOME": str(install_dir), "PYTHONUNBUFFERED": "1"},
-            "StartCalendarInterval": [
-                {"Weekday": weekday, "Hour": hour, "Minute": minute}
-                for weekday in range(2, 7)
-            ],
+            "StartCalendarInterval": weekday_intervals(hour, minute),
             "StandardOutPath": str(log_dir / f"scan-{slot}.log"),
             "StandardErrorPath": str(log_dir / f"scan-{slot}-error.log"),
             "ProcessType": "Background",
