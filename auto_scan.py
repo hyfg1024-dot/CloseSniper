@@ -10,6 +10,12 @@ from pathlib import Path
 from src.data_source import AkshareSource
 from src.scan_service import derive_strict_frame, run_market_scan
 from src.strategy import StrategyConfig
+from src.telegram_service import (
+    TelegramError,
+    format_final_message,
+    load_settings,
+    send_message,
+)
 from src.validation_store import ValidationStore
 
 
@@ -58,10 +64,40 @@ def main() -> None:
             config=cfg.as_dict(),
             candidates=candidates,
         )
-        finalized = store.finalize_staged_day(now.date().isoformat()) if args.slot == "1452" else False
+        trade_date = now.date().isoformat()
+        finalized = store.finalize_staged_day(trade_date) if args.slot == "1452" else False
+        telegram_status = "not_due"
+        if args.slot == "1452":
+            staged = store.staged_frame(trade_date)
+            completed_slots = set(staged["slot"].astype(str)) if not staged.empty else set()
+            settings = load_settings()
+            if completed_slots != {"1430", "1445", "1452"}:
+                telegram_status = "incomplete"
+            elif not settings.enabled or not settings.configured:
+                telegram_status = "disabled"
+            elif store.notification_sent(trade_date, "telegram"):
+                telegram_status = "already_sent"
+            else:
+                try:
+                    message = format_final_message(
+                        trade_date=trade_date,
+                        strict_candidates=strict_candidates,
+                        rational_candidates=store.final_frame(trade_date),
+                        generated_at=now,
+                    )
+                    send_message(settings, message)
+                    store.mark_notification_sent(trade_date, "telegram", now)
+                    telegram_status = "sent"
+                except TelegramError as exc:
+                    print(json.dumps({
+                        "status": "error", "slot": args.slot,
+                        "telegram": "failed", "reason": str(exc),
+                    }, ensure_ascii=False))
+                    raise SystemExit(1) from exc
         print(json.dumps({
             "status": "ok", "slot": args.slot, "rational": len(candidates),
             "strict": len(strict_candidates), "finalized": finalized,
+            "telegram": telegram_status,
         }, ensure_ascii=False))
 
 

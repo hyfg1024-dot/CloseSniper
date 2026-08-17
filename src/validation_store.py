@@ -136,6 +136,13 @@ class ValidationStore:
                     score REAL NOT NULL,
                     UNIQUE(strict_scan_id, code)
                 );
+                CREATE TABLE IF NOT EXISTS notification_deliveries (
+                    id INTEGER PRIMARY KEY,
+                    trade_date TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    sent_at TEXT NOT NULL,
+                    UNIQUE(trade_date, channel)
+                );
                 """
             )
             existing = {
@@ -391,6 +398,30 @@ class ValidationStore:
         """
         with self.connect() as db:
             return pd.read_sql_query(query, db, params=(trade_date,))
+
+    def notification_sent(self, trade_date: str, channel: str) -> bool:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM notification_deliveries WHERE trade_date=? AND channel=?",
+                (trade_date, channel),
+            ).fetchone()
+        return row is not None
+
+    def mark_notification_sent(
+        self,
+        trade_date: str,
+        channel: str,
+        sent_at: datetime | None = None,
+    ) -> None:
+        timestamp = sent_at or datetime.now()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO notification_deliveries (trade_date, channel, sent_at)
+                VALUES (?, ?, ?)
+                """,
+                (trade_date, channel, timestamp.isoformat(timespec="seconds")),
+            )
 
     def freeze_scan(
         self,

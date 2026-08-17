@@ -16,6 +16,15 @@ from src.strategy import (
     StrategyConfig,
     market_session_status,
 )
+from src.telegram_service import (
+    TelegramError,
+    TelegramSettings,
+    bot_identity,
+    discover_chat_id,
+    load_settings as load_telegram_settings,
+    save_settings as save_telegram_settings,
+    send_message as send_telegram_message,
+)
 from src.validation_store import ValidationStore
 from src.validation_ui import render_history_page, render_validation_page
 
@@ -91,6 +100,7 @@ h1,h2,h3 { font-family:"Noto Serif SC","Songti SC",serif !important; letter-spac
 .mode-note b { display:block;font-family:"Noto Serif SC","Songti SC",serif;font-size:18px;margin-bottom:5px; }
 .mode-note span { color:#626a63;font-size:12px;line-height:1.65; }
 .muted { color:#6f756e;font-size:12px; }
+.telegram-ready { border-left:4px solid var(--moss);padding:8px 10px;background:rgba(49,91,69,.08);font-size:12px;line-height:1.6; }
 .stButton>button { border-radius:1px;background:var(--ink);color:var(--paper);border:0;font-weight:600;min-height:44px; }
 .stButton>button:hover { background:var(--signal);color:white; }
 [data-testid="stDataFrame"] { border:1px solid var(--line); }
@@ -150,6 +160,63 @@ def make_config() -> StrategyConfig:
         max_float_cap_yi=max_cap,
         max_candidates=max_candidates,
     )
+
+
+def render_telegram_settings() -> None:
+    settings = load_telegram_settings()
+    with st.sidebar.expander("Telegram 最终结果推送"):
+        if settings.configured:
+            bot_name = f"@{settings.bot_username}" if settings.bot_username else "已连接机器人"
+            state = "已开启" if settings.enabled else "已暂停"
+            st.markdown(
+                f'<div class="telegram-ready"><b>{bot_name}</b><br>{state} · Chat ID 尾号 {settings.chat_id[-4:]}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.caption("输入新机器人的Token后，系统会从你刚发送的 /start 自动识别Chat ID。")
+
+        with st.form("telegram_settings_form"):
+            token_input = st.text_input(
+                "Bot Token",
+                type="password",
+                value="",
+                placeholder="已保存时可留空",
+                help="Token只保存在本机Application Support，不会上传GitHub。",
+            )
+            enabled = st.toggle(
+                "14:52完成后推送",
+                value=settings.enabled if settings.configured else True,
+            )
+            connect = st.form_submit_button("保存并连接", width="stretch")
+
+        if connect:
+            token = token_input.strip() or settings.bot_token
+            if not token:
+                st.warning("请先输入Bot Token。")
+            else:
+                try:
+                    username = bot_identity(token)
+                    chat_id = discover_chat_id(token)
+                    save_telegram_settings(TelegramSettings(
+                        bot_token=token,
+                        chat_id=chat_id,
+                        bot_username=username,
+                        enabled=enabled,
+                    ))
+                    st.success("机器人与Chat ID已连接。")
+                    st.rerun()
+                except TelegramError as exc:
+                    st.error(str(exc))
+
+        if settings.configured and st.button("发送测试消息", width="stretch"):
+            try:
+                send_telegram_message(
+                    settings,
+                    f"✅ CloseSniper Telegram连接成功\n测试时间：{datetime.now():%Y-%m-%d %H:%M:%S}",
+                )
+                st.success("测试消息已发送，请查看Telegram。")
+            except TelegramError as exc:
+                st.error(str(exc))
 
 
 def render_daily_result_panel(container, title: str, frame: pd.DataFrame, note: str) -> None:
@@ -243,6 +310,7 @@ def render_daily_timeline(
 cfg = make_config()
 status, status_note = market_session_status()
 st.sidebar.markdown("---")
+render_telegram_settings()
 use_demo = st.sidebar.toggle("演示数据", value=False, help="网络异常或非交易时段可体验完整流程")
 with st.sidebar.expander("排除规则"):
     st.write("ST / *ST、退市整理、上市首日 N/C、北交所股票。停牌或字段缺失股票自动跳过。")

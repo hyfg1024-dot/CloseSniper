@@ -124,6 +124,24 @@ class ValidationTests(unittest.TestCase):
         self.assertFalse(self.store.finalize_staged_day("2026-08-03"))
         self.assertTrue(self.store.final_frame("2026-08-03").empty)
 
+    def test_notification_delivery_is_recorded_once(self):
+        self.assertFalse(self.store.notification_sent("2026-08-03", "telegram"))
+
+        self.store.mark_notification_sent(
+            "2026-08-03", "telegram", datetime(2026, 8, 3, 14, 53),
+        )
+        self.store.mark_notification_sent(
+            "2026-08-03", "telegram", datetime(2026, 8, 3, 14, 54),
+        )
+
+        self.assertTrue(self.store.notification_sent("2026-08-03", "telegram"))
+        with self.store.connect() as db:
+            count = db.execute(
+                "SELECT COUNT(*) FROM notification_deliveries WHERE trade_date=? AND channel=?",
+                ("2026-08-03", "telegram"),
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
     def test_strict_daily_result_keeps_latest_slot_under_its_own_mode(self):
         common = dict(provider="测试")
         self.store.save_strict_scan(
