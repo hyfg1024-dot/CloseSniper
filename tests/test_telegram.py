@@ -9,6 +9,7 @@ import pandas as pd
 from src.telegram_service import (
     TelegramSettings,
     format_final_message,
+    format_scan_issue_message,
     load_settings,
     save_settings,
 )
@@ -46,6 +47,18 @@ class TelegramTests(unittest.TestCase):
         self.assertIn("改进股（600002）", message)
         self.assertIn("综合86.5", message)
         self.assertIn("三次稳定", message)
+
+    def test_scan_issue_message_explains_missing_result(self) -> None:
+        message = format_scan_issue_message(
+            trade_date="2026-08-21",
+            failed_slots=["1430", "1445"],
+            reason="免费行情读取失败",
+            generated_at=datetime(2026, 8, 21, 14, 52),
+        )
+
+        self.assertIn("未形成最终结果", message)
+        self.assertIn("14:30、14:45", message)
+        self.assertIn("请勿把“无结果”理解为“扫描成功且无候选”", message)
 
 
 if __name__ == "__main__":

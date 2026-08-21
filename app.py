@@ -219,11 +219,28 @@ def render_telegram_settings() -> None:
                 st.error(str(exc))
 
 
-def render_daily_result_panel(container, title: str, frame: pd.DataFrame, note: str) -> None:
+def render_daily_result_panel(
+    container,
+    title: str,
+    frame: pd.DataFrame,
+    note: str,
+    scan_status: dict | None = None,
+) -> None:
     with container:
         st.markdown(f"#### {title} · 当日结果")
         st.caption(note)
         if frame.empty:
+            status = (scan_status or {}).get("status")
+            attempts = int((scan_status or {}).get("attempt_count") or 0)
+            if status == "failed":
+                reason = str((scan_status or {}).get("error_message") or "免费行情暂不可用")
+                if len(reason) > 180:
+                    reason = reason[:177] + "…"
+                st.error(f"自动扫描失败（已尝试{attempts}次）。\n\n{reason}")
+                return
+            if status in {"running", "retrying"}:
+                st.warning(f"行情读取中，系统正在自动重试（第{attempts}次）。")
+                return
             st.info("今日尚无结果。")
             return
         available = frame[frame["code"].notna()].copy() if "code" in frame else pd.DataFrame()
@@ -259,9 +276,14 @@ def render_daily_timeline(
     strict_frame: pd.DataFrame,
     rational_frame: pd.DataFrame,
     final_frame: pd.DataFrame,
+    scan_status_frame: pd.DataFrame,
 ) -> None:
     st.markdown("## 今日三时点结果")
     st.caption("每一列都是当时冻结的原始快照；不会用后一个时点的数据覆盖前一个时点。")
+    status_by_slot = {
+        str(row["slot"]): row
+        for row in scan_status_frame.to_dict("records")
+    } if not scan_status_frame.empty else {}
 
     st.markdown("### 严格标准")
     strict_columns = st.columns(3)
@@ -271,6 +293,7 @@ def render_daily_timeline(
             f"{slot[:2]}:{slot[2:]}",
             _slot_frame(strict_frame, slot),
             "该时点严格标准原始结果。",
+            status_by_slot.get(slot),
         )
 
     st.markdown("### 改进流程")
@@ -281,6 +304,7 @@ def render_daily_timeline(
             f"{slot[:2]}:{slot[2:]}",
             _slot_frame(rational_frame, slot),
             "该时点改进流程原始结果。",
+            status_by_slot.get(slot),
         )
 
     st.markdown("### 加权后的最终结果")
@@ -294,7 +318,12 @@ def render_daily_timeline(
     if missing_slots:
         missing_text = "、".join(f"{slot[:2]}:{slot[2:]}" for slot in missing_slots)
         with final_container:
-            st.info(f"尚未生成加权结果：等待 {missing_text} 原始节点完成。")
+            failed_slots = [slot for slot in missing_slots if status_by_slot.get(slot, {}).get("status") == "failed"]
+            if failed_slots:
+                failed_text = "、".join(f"{slot[:2]}:{slot[2:]}" for slot in failed_slots)
+                st.error(f"今日无法生成加权结果：{failed_text} 行情读取失败，系统已完成自动重试。")
+            else:
+                st.info(f"尚未生成加权结果：等待 {missing_text} 原始节点完成。")
     elif final_frame.empty:
         with final_container:
             st.warning("14:52节点已执行，加权完成，最终符合条件 0 只。")
@@ -322,7 +351,7 @@ st.markdown(
   <h1>尾盘狙击</h1>
   <p>把全市场噪声压缩成少数可复核的尾盘候选。硬条件先过筛，再确认量价、均线、分时强度与热点题材。</p>
   <span class="badge live">{status}</span><span class="badge">{datetime.now():%Y-%m-%d %H:%M}</span>
-  <span class="badge">免费行情 · 新浪 / 腾讯 / AKShare</span>
+  <span class="badge">免费行情 · 新浪 / 东方财富 / 腾讯</span>
 </section>
 """,
     unsafe_allow_html=True,
@@ -364,6 +393,7 @@ if scan_mode is None:
         strict_frame=validation_store.strict_frame(today),
         rational_frame=validation_store.staged_frame(today),
         final_frame=validation_store.final_frame(today),
+        scan_status_frame=validation_store.scan_status_frame(today),
     )
     st.caption("后台任务将在14:30、14:45和14:52依次写入三个原始结果区，14:52后生成加权最终结果。")
     st.stop()
@@ -435,6 +465,7 @@ if not use_demo and in_scan_window:
         strict_frame=validation_store.strict_frame(today),
         rational_frame=validation_store.staged_frame(today),
         final_frame=validation_store.final_frame(today),
+        scan_status_frame=validation_store.scan_status_frame(today),
     )
 else:
     demo_container = st.container(border=True)

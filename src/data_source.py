@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+import math
+import time
 from typing import Callable
 
 import numpy as np
@@ -46,9 +48,85 @@ class AkshareSource:
                 frame.attrs["provider"] = "东方财富"
                 return frame
             except Exception as em_exc:
-                raise MarketDataError(
-                    f"新浪与东方财富实时接口均不可用；新浪：{sina_exc}；东方财富：{em_exc}"
-                ) from em_exc
+                try:
+                    return self._tencent_spot()
+                except Exception as tx_exc:
+                    raise MarketDataError(
+                        "三个免费实时接口均不可用；"
+                        f"新浪：{sina_exc}；东方财富：{em_exc}；腾讯：{tx_exc}"
+                    ) from tx_exc
+
+    @staticmethod
+    def _tencent_spot() -> pd.DataFrame:
+        """读取腾讯沪深京全市场快照；每一页独立重试，避免单页断线拖垮整批。"""
+        url = "https://proxy.finance.qq.com/cgi/cgi-bin/rank/hs/getBoardRankList"
+        page_size = 200
+
+        def fetch_page(offset: int) -> dict:
+            params = {
+                "_appver": "11.17.0",
+                "board_code": "aStock",
+                "sort_type": "price",
+                "direct": "down",
+                "offset": str(offset),
+                "count": str(page_size),
+            }
+            last_error: Exception | None = None
+            for attempt in range(3):
+                try:
+                    session = requests.Session()
+                    response = session.get(url, params=params, timeout=20)
+                    response.raise_for_status()
+                    payload = response.json()
+                    if "data" not in payload or "rank_list" not in payload["data"]:
+                        raise MarketDataError("腾讯行情返回格式异常")
+                    return payload["data"]
+                except Exception as exc:
+                    last_error = exc
+                    if attempt < 2:
+                        time.sleep(0.8 * (attempt + 1))
+            raise MarketDataError(f"腾讯行情第{offset // page_size + 1}页失败：{last_error}")
+
+        first = fetch_page(0)
+        total = int(first.get("total", 0))
+        if total <= 0:
+            raise MarketDataError("腾讯实时行情返回空数据")
+        rows = list(first["rank_list"])
+        offsets = [page * page_size for page in range(1, math.ceil(total / page_size))]
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(fetch_page, offset) for offset in offsets]
+            for future in as_completed(futures):
+                rows.extend(future.result()["rank_list"])
+        raw = pd.DataFrame(rows).drop_duplicates(subset=["code"], ignore_index=True)
+        if len(raw) < total:
+            raise MarketDataError(f"腾讯实时行情不完整：仅取得{len(raw)}/{total}只")
+
+        number = lambda name: pd.to_numeric(raw[name], errors="coerce")
+        price = number("zxj")
+        change = number("zdf")
+        previous = price / (1 + change / 100).replace(0, np.nan)
+        frame = pd.DataFrame(
+            {
+                "代码": raw["code"].astype(str).str.replace(r"^(sh|sz|bj)", "", regex=True).str.zfill(6),
+                "名称": raw["name"],
+                "最新价": price,
+                "涨跌幅": change,
+                "量比": number("lb"),
+                "换手率": number("hsl"),
+                # 腾讯 ltsz 单位为亿元。
+                "流通市值": number("ltsz") * 1e8,
+                # 腾讯榜单 volume 单位为百股，turnover 单位为万元。
+                "成交量": number("volume") * 100,
+                "成交额": number("turnover") * 10_000,
+                # 榜单不提供日内 OHLC；这些字段不参与实时硬筛，日线仅用收盘与成交量。
+                "最高": price,
+                "最低": price,
+                "今开": previous,
+                "昨收": previous,
+            }
+        )
+        frame.attrs["provider"] = "腾讯财经"
+        return frame
 
     @staticmethod
     def _sina_spot() -> pd.DataFrame:

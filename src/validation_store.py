@@ -143,6 +143,19 @@ class ValidationStore:
                     sent_at TEXT NOT NULL,
                     UNIQUE(trade_date, channel)
                 );
+                CREATE TABLE IF NOT EXISTS scan_runs (
+                    trade_date TEXT NOT NULL,
+                    slot TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempted_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 1,
+                    provider TEXT,
+                    market_count INTEGER,
+                    candidate_count INTEGER,
+                    error_message TEXT,
+                    PRIMARY KEY (trade_date, slot)
+                );
                 """
             )
             existing = {
@@ -218,6 +231,58 @@ class ValidationStore:
                 """,
                 rows,
             )
+
+    def record_scan_run(
+        self,
+        *,
+        slot: str,
+        attempted_at: datetime,
+        status: str,
+        attempt_count: int,
+        completed_at: datetime | None = None,
+        provider: str | None = None,
+        market_count: int | None = None,
+        candidate_count: int | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if slot not in {"1430", "1445", "1452"}:
+            raise ValueError(f"未知扫描节点：{slot}")
+        trade_date = attempted_at.date().isoformat()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO scan_runs
+                (trade_date, slot, status, attempted_at, completed_at, attempt_count,
+                 provider, market_count, candidate_count, error_message)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trade_date, slot) DO UPDATE SET
+                    status=excluded.status,
+                    attempted_at=excluded.attempted_at,
+                    completed_at=excluded.completed_at,
+                    attempt_count=excluded.attempt_count,
+                    provider=excluded.provider,
+                    market_count=excluded.market_count,
+                    candidate_count=excluded.candidate_count,
+                    error_message=excluded.error_message
+                """,
+                (
+                    trade_date, slot, status, attempted_at.isoformat(timespec="seconds"),
+                    completed_at.isoformat(timespec="seconds") if completed_at else None,
+                    int(attempt_count), provider, market_count, candidate_count,
+                    error_message[:1000] if error_message else None,
+                ),
+            )
+
+    def scan_status_frame(self, trade_date: str) -> pd.DataFrame:
+        query = """
+            SELECT trade_date, slot, status, attempted_at, completed_at, attempt_count,
+                   provider, market_count, candidate_count, error_message
+            FROM scan_runs
+            WHERE trade_date=?
+            ORDER BY slot
+        """
+        with self.connect() as db:
+            return pd.read_sql_query(query, db, params=(trade_date,))
 
     def finalize_staged_day(self, trade_date: str) -> bool:
         """以14:52候选为门槛生成最终名单；返回 True 表示首次生成。"""

@@ -183,3 +183,25 @@ def format_final_message(
         lines.append("无符合条件股票")
     lines.extend(["", "仅供策略研究，不构成投资建议。"])
     return "\n".join(lines)
+
+
+def format_scan_issue_message(
+    *,
+    trade_date: str,
+    failed_slots: Iterable[str],
+    reason: str,
+    generated_at: datetime | None = None,
+) -> str:
+    slots = [str(slot) for slot in failed_slots]
+    slot_text = "、".join(f"{slot[:2]}:{slot[2:]}" for slot in slots) or "未知节点"
+    concise_reason = str(reason).replace("\n", " ")
+    if len(concise_reason) > 700:
+        concise_reason = concise_reason[:697] + "…"
+    return "\n".join([
+        f"⚠️ CloseSniper｜{trade_date} 尾盘扫描未形成最终结果",
+        f"通知时间：{(generated_at or datetime.now()):%H:%M:%S}",
+        f"异常节点：{slot_text}",
+        f"原因：{concise_reason}",
+        "系统已自动重试，仍未取得完整行情；今日不生成三时点加权名单。",
+        "请勿把“无结果”理解为“扫描成功且无候选”。",
+    ])
