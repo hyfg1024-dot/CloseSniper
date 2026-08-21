@@ -50,7 +50,7 @@ def main() -> None:
     subprocess.run(
         [
             "rsync", "-a", "--delete",
-            "--exclude", ".git/", "--exclude", "data/", "--exclude", "logs/",
+            "--exclude", ".git/", "--exclude", "data/", "--exclude", "logs/", "--exclude", "config/",
             "--exclude", "__pycache__/", "--exclude", ".pytest_cache/",
             f"{project}/", f"{install_dir}/",
         ],
@@ -109,7 +109,7 @@ def main() -> None:
         install_agent(domain, scan_plist, label, scan_payload)
 
     print(f"后台环境：{install_dir}")
-    print("已安装：工作日14:30、14:45静默采样，14:52生成严格与理性两套结果；09:45、10:30自动校验。")
+    print("已安装：工作日14:30、14:45静默采样，14:52生成严格与改进两套结果；09:45、10:30自动校验。")
 
 
 if __name__ == "__main__":

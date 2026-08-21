@@ -19,6 +19,9 @@ class StrategyConfig:
     max_float_cap_yi: float = 200.0
     max_candidates: int = 30
     min_vwap_ratio: float = 0.70
+    max_10d_return_pct: float = 12.0
+    max_ma20_distance_pct: float = 10.0
+    max_recent_daily_gain_pct: float = 8.0
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -146,7 +149,14 @@ def merge_live_daily_bar(
     return df
 
 
-def analyze_daily(raw: pd.DataFrame, mode: str = "strict") -> dict[str, Any]:
+def analyze_daily(
+    raw: pd.DataFrame,
+    mode: str = "strict",
+    *,
+    max_10d_return_pct: float = 12.0,
+    max_ma20_distance_pct: float = 10.0,
+    max_recent_daily_gain_pct: float = 8.0,
+) -> dict[str, Any]:
     df = _numeric_history(raw)
     if len(df) < 65:
         return {"daily_ok": False, "volume_step": False, "ma_bull": False, "daily_reason": "日线不足60日"}
@@ -161,8 +171,7 @@ def analyze_daily(raw: pd.DataFrame, mode: str = "strict") -> dict[str, Any]:
     ma_rising = all(rising.values())
     ma_strict = bool(ma_order and ma_rising)
     ma_rational = bool(
-        last["close"] >= last["ma5"] > last["ma10"] > last["ma20"]
-        and last["close"] > last["ma60"]
+        last["close"] >= last["ma5"] > last["ma10"] > last["ma20"] > last["ma60"]
         and all(rising[w] for w in (5, 10, 20))
     )
     ma_bull = ma_strict if mode == "strict" else ma_rational
@@ -171,6 +180,9 @@ def analyze_daily(raw: pd.DataFrame, mode: str = "strict") -> dict[str, Any]:
     transitions = int(np.sum(np.diff(volumes[-4:]) > 0))
     slope = float(np.polyfit(np.arange(5), volumes, 1)[0])
     volume_step = bool(slope > 0 and transitions >= 2 and volumes[-1] >= np.mean(volumes) * 1.03)
+    return_10d_pct = float((last["close"] / df.iloc[-11]["close"] - 1) * 100)
+    ma20_distance_pct = float((last["close"] / last["ma20"] - 1) * 100)
+    recent_max_gain_pct = float(df["close"].pct_change().tail(10).max() * 100)
     return {
         "daily_ok": True,
         "volume_step": volume_step,
@@ -185,6 +197,12 @@ def analyze_daily(raw: pd.DataFrame, mode: str = "strict") -> dict[str, Any]:
         "ma10": float(last["ma10"]),
         "ma20": float(last["ma20"]),
         "ma60": float(last["ma60"]),
+        "return_10d_pct": return_10d_pct,
+        "ma20_distance_pct": ma20_distance_pct,
+        "recent_max_gain_pct": recent_max_gain_pct,
+        "risk_return_ok": return_10d_pct <= max_10d_return_pct,
+        "risk_distance_ok": ma20_distance_pct <= max_ma20_distance_pct,
+        "risk_surge_ok": recent_max_gain_pct <= max_recent_daily_gain_pct,
         "volume_slope": slope / max(float(np.mean(volumes)), 1),
         "daily_reason": "均线结构且放量通过" if ma_bull and volume_step else "均线或量能未确认",
     }
@@ -248,6 +266,12 @@ def finalize_candidate(row: dict[str, Any]) -> dict[str, Any]:
         "跑赢大盘": bool(row.get("relative_strong")),
         "回踩有效": bool(row.get("pullback_ok")),
     }
+    if row.get("apply_improved_risk"):
+        checks.update({
+            "近10日涨幅不过热": bool(row.get("risk_return_ok")),
+            "MA20乖离不过大": bool(row.get("risk_distance_ok")),
+            "近期无异常大阳线": bool(row.get("risk_surge_ok")),
+        })
     hot = bool(row.get("hot_concepts"))
     change = _number(row.get("change_pct"))
     ratio = _number(row.get("volume_ratio"))

@@ -28,7 +28,7 @@ class TelegramTests(unittest.TestCase):
     def test_final_message_contains_both_result_modes(self) -> None:
         strict = [{"code": "600001", "name": "严格股", "score": 88, "price": 10.5}]
         rational = pd.DataFrame([{
-            "code": "600002", "name": "理性股", "composite_score": 86.5,
+            "code": "600002", "name": "改进股", "composite_score": 86.5,
             "score_1430": 80, "score_1445": 85, "score_1452": 90,
             "persistence": "三次稳定",
         }])
@@ -41,9 +41,9 @@ class TelegramTests(unittest.TestCase):
         )
 
         self.assertIn("严格标准｜14:52", message)
-        self.assertIn("理性流程｜三时点加权", message)
+        self.assertIn("改进流程｜三时点加权", message)
         self.assertIn("严格股（600001）", message)
-        self.assertIn("理性股（600002）", message)
+        self.assertIn("改进股（600002）", message)
         self.assertIn("综合86.5", message)
         self.assertIn("三次稳定", message)
 

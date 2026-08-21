@@ -47,13 +47,14 @@ class ScanResult:
 
 
 def derive_strict_frame(rational_frame: pd.DataFrame) -> pd.DataFrame:
-    """复用同一份行情分析，将理性均线门槛切换为严格均线门槛。"""
+    """复用同一份行情分析，将改进流程切换回未经改动的严格标准。"""
     if rational_frame.empty:
         return rational_frame.copy()
     rows: list[dict[str, Any]] = []
     for source in rational_frame.to_dict("records"):
         row = deepcopy(source)
         row["ma_bull"] = bool(row.get("ma_strict"))
+        row["apply_improved_risk"] = False
         rows.append(finalize_candidate(row))
     frame = pd.DataFrame(rows).sort_values(["passed", "score"], ascending=[False, False])
     frame["strategy_rank"] = range(1, len(frame) + 1)
@@ -120,7 +121,13 @@ def run_market_scan(
         row["min_volume_ratio"] = cfg.min_volume_ratio
         if code in daily_map:
             live_daily = merge_live_daily_bar(daily_map[code], row, now=now)
-            daily_result = analyze_daily(live_daily, mode=mode)
+            daily_result = analyze_daily(
+                live_daily,
+                mode=mode,
+                max_10d_return_pct=cfg.max_10d_return_pct,
+                max_ma20_distance_pct=cfg.max_ma20_distance_pct,
+                max_recent_daily_gain_pct=cfg.max_recent_daily_gain_pct,
+            )
         else:
             daily_result = {"volume_step": False, "ma_bull": False}
         minute_result = (
@@ -129,7 +136,13 @@ def run_market_scan(
             else {"vwap_strong": False, "relative_strong": False, "pullback_ok": False}
         )
         concepts = [name for name, members in concept_map.items() if code in members]
-        results.append(finalize_candidate({**row, **daily_result, **minute_result, "hot_concepts": concepts}))
+        results.append(finalize_candidate({
+            **row,
+            **daily_result,
+            **minute_result,
+            "hot_concepts": concepts,
+            "apply_improved_risk": mode != "strict",
+        }))
 
     if results:
         frame = pd.DataFrame(results).sort_values(["passed", "score"], ascending=[False, False])

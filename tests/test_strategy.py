@@ -80,7 +80,7 @@ class StrategyTests(unittest.TestCase):
         self.assertAlmostEqual(float(merged.iloc[-1]["close"]), 10.4)
         self.assertEqual(float(merged.iloc[-1]["volume"]), 180_000)
 
-    def test_rational_mode_relaxes_only_long_term_ma_gate(self):
+    def test_improved_mode_still_requires_ma20_above_ma60(self):
         close = np.r_[np.linspace(20, 10, 50), np.linspace(9, 15, 20)]
         history = pd.DataFrame(
             {
@@ -95,8 +95,44 @@ class StrategyTests(unittest.TestCase):
         strict = analyze_daily(history, mode="strict")
         rational = analyze_daily(history, mode="rational")
         self.assertFalse(strict["ma_bull"])
-        self.assertTrue(rational["ma_bull"])
-        self.assertFalse(rational["ma60_rising"])
+        self.assertFalse(rational["ma_bull"])
+        self.assertLess(rational["ma20"], rational["ma60"])
+
+    def test_improved_risk_filters_do_not_change_strict_result(self):
+        base = {
+            "change_pct": 4.0,
+            "volume_ratio": 1.5,
+            "turnover": 7.0,
+            "float_cap_yi": 100.0,
+            "volume_step": True,
+            "volume_slope": 0.14,
+            "ma_bull": True,
+            "ma5": 12.0,
+            "ma60": 11.0,
+            "vwap_strong": True,
+            "vwap_ratio": 0.9,
+            "relative_strong": True,
+            "stock_intraday_pct": 3.0,
+            "market_intraday_pct": 0.5,
+            "pullback_ok": True,
+            "pullback_pct": 0.4,
+            "hot_concepts": [],
+            "daily_ok": True,
+            "minute_ok": True,
+            "min_volume_ratio": 1.0,
+            "risk_return_ok": False,
+            "risk_distance_ok": False,
+            "risk_surge_ok": False,
+        }
+
+        strict = finalize_candidate({**base, "apply_improved_risk": False})
+        improved = finalize_candidate({**base, "apply_improved_risk": True})
+
+        self.assertTrue(strict["passed"])
+        self.assertFalse(improved["passed"])
+        self.assertIn("近10日涨幅不过热", improved["failed_reasons"])
+        self.assertIn("MA20乖离不过大", improved["failed_reasons"])
+        self.assertIn("近期无异常大阳线", improved["failed_reasons"])
 
     def test_strategy_match_score_ranks_stronger_candidate_first(self):
         strong = {

@@ -101,13 +101,12 @@ class ValidationTests(unittest.TestCase):
         self.assertFalse(self.store.finalize_staged_day("2026-08-03"))
         final = self.store.final_frame("2026-08-03").set_index("code")
         self.assertNotIn("600009", final.index)
+        self.assertNotIn("600003", final.index)
         self.assertAlmostEqual(final.loc["600001", "composite_score"], 86.5)
         self.assertAlmostEqual(final.loc["600002", "composite_score"], 67.4)
-        self.assertAlmostEqual(final.loc["600003", "composite_score"], 46.0)
         self.assertEqual(final.loc["600001", "persistence"], "三次稳定")
         self.assertEqual(final.loc["600002", "persistence"], "连续两次")
-        self.assertEqual(final.loc["600003", "persistence"], "14:52新进入")
-        self.assertEqual(len(self.store.validation_frame()), 3)
+        self.assertEqual(len(self.store.validation_frame()), 2)
 
     def test_final_result_requires_all_three_slots(self):
         candidate = {

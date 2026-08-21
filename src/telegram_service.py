@@ -168,7 +168,7 @@ def format_final_message(
     else:
         lines.append("无符合条件股票")
 
-    lines.extend(["", f"【理性流程｜三时点加权】{len(rational)}只"])
+    lines.extend(["", f"【改进流程｜三时点加权】{len(rational)}只"])
     if rational:
         for index, item in enumerate(rational, 1):
             lines.append(

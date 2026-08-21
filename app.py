@@ -273,14 +273,14 @@ def render_daily_timeline(
             "该时点严格标准原始结果。",
         )
 
-    st.markdown("### 理性流程")
+    st.markdown("### 改进流程")
     rational_columns = st.columns(3)
     for column, slot in zip(rational_columns, ("1430", "1445", "1452"), strict=True):
         render_daily_result_panel(
             column,
             f"{slot[:2]}:{slot[2:]}",
             _slot_frame(rational_frame, slot),
-            "该时点理性流程原始结果。",
+            "该时点改进流程原始结果。",
         )
 
     st.markdown("### 加权后的最终结果")
@@ -303,7 +303,7 @@ def render_daily_timeline(
             final_container,
             "三时点加权名单",
             final_frame,
-            "20% × 14:30评分 + 30% × 14:45评分 + 50% × 14:52评分；只有14:52仍入选的股票进入最终名单。",
+            "20% × 14:30评分 + 30% × 14:45评分 + 50% × 14:52评分；必须连续通过14:45与14:52才进入最终名单。",
         )
 
 
@@ -349,14 +349,14 @@ st.markdown(
     """
 <div class="mode-guide">
   <div class="mode-note"><b>严格标准</b><span>初始规则完整保留：现价 ≥ MA5 &gt; MA10 &gt; MA20 &gt; MA60，四条均线均较5日前上升。用于对照，不写入次日校验。</span></div>
-  <div class="mode-note recommended"><b>理性流程 · 推荐</b><span>将当日实时行情合成临时日K；短中期均线向上且现价位于MA60上方，MA60上升改为排名加分。</span></div>
+  <div class="mode-note recommended"><b>改进流程 · 风险收紧</b><span>保留实时日K确认，同时要求MA20高于MA60，过滤短期过热、乖离过大与近期异常大阳线；最终名单拒绝14:52突然进入。</span></div>
 </div>
     """,
     unsafe_allow_html=True,
 )
 strict_col, rational_col = st.columns(2)
 strict_run = strict_col.button("严格标准扫描", width="stretch", help="完全按初始均线标准执行")
-rational_run = rational_col.button("理性流程扫描（推荐）", type="primary", width="stretch", help="包含当日临时日K与分阶段复核")
+rational_run = rational_col.button("改进流程扫描", type="primary", width="stretch", help="增加高位过热过滤，并要求14:45与14:52连续通过")
 scan_mode = "strict" if strict_run else "rational" if rational_run else None
 if scan_mode is None:
     today = datetime.now().date().isoformat()
@@ -368,7 +368,7 @@ if scan_mode is None:
     st.caption("后台任务将在14:30、14:45和14:52依次写入三个原始结果区，14:52后生成加权最终结果。")
     st.stop()
 
-scan_mode_label = "严格标准" if scan_mode == "strict" else "理性流程"
+scan_mode_label = "严格标准" if scan_mode == "strict" else "改进流程"
 st.caption(f"本次执行：{scan_mode_label}")
 
 try:
@@ -503,7 +503,8 @@ with st.expander("规则口径与风控"):
 - 量比：新浪快照不提供量比时，用今日累计成交量 ÷ 近 5 日同期预期成交量估算。
 - 当日临时日K：将扫描时的实时价、开高低、成交量合并到历史日线后重新计算均线。
 - 严格均线：现价 ≥ MA5 > MA10 > MA20 > MA60，且四条均线均较 5 日前上升。
-- 理性均线：现价 ≥ MA5 > MA10 > MA20，MA5/10/20较 5 日前上升，且现价在 MA60 上方；MA60上升只作加分。
+- 改进均线：现价 ≥ MA5 > MA10 > MA20 > MA60，MA5/10/20较5日前上升；另过滤近10日涨幅过热、MA20乖离过大和近期异常大阳线。
+- 最终连续性：必须同时通过14:45与14:52，14:52首次出现的股票不进入最终名单。
 - 分时强势：至少 70% 的分钟收盘价位于当日成交均价线上方，最新价仍在均价线上方。
 - 跑赢大盘：个股从首个分钟点至最新分钟点的涨幅高于同期上证指数。
 - 回踩有效：最新价未跌破成交均价，且距离最近 30 分钟高点不超过 1.2%。

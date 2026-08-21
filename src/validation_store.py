@@ -271,6 +271,9 @@ class ValidationStore:
                     ).fetchone()
                     scores[slot] = float(row["score"]) if row else None
                 appearances = sum(value is not None for value in scores.values())
+                # 改进流程要求至少连续通过14:45与14:52；拒绝尾盘最后一刻突然进入。
+                if scores["1445"] is None:
+                    continue
                 composite = round(
                     0.20 * (scores["1430"] or 0)
                     + 0.30 * (scores["1445"] or 0)
@@ -279,12 +282,8 @@ class ValidationStore:
                 )
                 if appearances == 3:
                     persistence = "三次稳定"
-                elif scores["1445"] is not None:
-                    persistence = "连续两次"
-                elif scores["1430"] is not None:
-                    persistence = "中途波动"
                 else:
-                    persistence = "14:52新进入"
+                    persistence = "连续两次"
                 db.execute(
                     """
                     INSERT INTO signals
