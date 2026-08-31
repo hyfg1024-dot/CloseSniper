@@ -277,6 +277,9 @@ def render_daily_timeline(
     rational_frame: pd.DataFrame,
     final_frame: pd.DataFrame,
     scan_status_frame: pd.DataFrame,
+    review_status_frame: pd.DataFrame,
+    review_strict_frame: pd.DataFrame,
+    review_improved_frame: pd.DataFrame,
 ) -> None:
     st.markdown("## 今日三时点结果")
     st.caption("每一列都是当时冻结的原始快照；不会用后一个时点的数据覆盖前一个时点。")
@@ -307,7 +310,7 @@ def render_daily_timeline(
             status_by_slot.get(slot),
         )
 
-    st.markdown("### 加权后的最终结果")
+    st.markdown("### 14:52冻结决策版 · 准时结果")
     final_container = st.container(border=True)
     completed_slots = (
         set(rational_frame["slot"].astype(str))
@@ -321,19 +324,60 @@ def render_daily_timeline(
             failed_slots = [slot for slot in missing_slots if status_by_slot.get(slot, {}).get("status") == "failed"]
             if failed_slots:
                 failed_text = "、".join(f"{slot[:2]}:{slot[2:]}" for slot in failed_slots)
-                st.error(f"今日无法生成加权结果：{failed_text} 行情读取失败，系统已完成自动重试。")
+                st.error(f"今日无法生成冻结决策版：{failed_text} 行情读取失败，系统已完成自动重试。")
             else:
-                st.info(f"尚未生成加权结果：等待 {missing_text} 原始节点完成。")
+                st.info(f"尚未生成冻结决策版：等待 {missing_text} 原始节点完成。")
     elif final_frame.empty:
         with final_container:
-            st.warning("14:52节点已执行，加权完成，最终符合条件 0 只。")
+            st.warning("14:52已冻结，准时决策版符合条件 0 只。该结果进入次日校验。")
     else:
         render_daily_result_panel(
             final_container,
-            "三时点加权名单",
+            "14:52冻结名单",
             final_frame,
-            "20% × 14:30评分 + 30% × 14:45评分 + 50% × 14:52评分；必须连续通过14:45与14:52才进入最终名单。",
+            "用于当日决策及次日校验：20% × 14:30评分 + 30% × 14:45评分 + 50% × 14:52评分；只复核14:45候选池。",
         )
+
+    st.markdown("### 完整重扫复核版 · 原架构保留")
+    review_container = st.container(border=True)
+    if review_status_frame.empty:
+        with review_container:
+            st.info("等待14:52冻结决策版完成后，后台开始原架构完整重扫。")
+    else:
+        review_status = review_status_frame.iloc[0].to_dict()
+        state = str(review_status.get("status", ""))
+        if state == "running":
+            with review_container:
+                st.warning("完整重扫正在后台运行；不会影响或覆盖上方冻结决策版。")
+        elif state == "failed":
+            with review_container:
+                st.error(f"完整重扫失败：{review_status.get('error_message') or '免费行情暂不可用'}")
+        else:
+            completed = str(review_status.get("completed_at") or "")
+            completed_text = completed[11:19] if len(completed) >= 19 else "—"
+            with review_container:
+                st.caption(f"原架构完成时间：{completed_text}。仅供对照复核，不进入次日校验，也不覆盖准时版。")
+                left, right = st.columns(2)
+                with left:
+                    st.markdown("#### 严格标准 · 完整重扫")
+                    if review_strict_frame.empty:
+                        st.warning("完整重扫符合条件 0 只。")
+                    else:
+                        st.dataframe(
+                            review_strict_frame[["code", "name", "score"]].rename(
+                                columns={"code": "代码", "name": "名称", "score": "评分"}
+                            ), hide_index=True, width="stretch",
+                        )
+                with right:
+                    st.markdown("#### 改进流程 · 完整重扫")
+                    if review_improved_frame.empty:
+                        st.warning("完整重扫符合条件 0 只。")
+                    else:
+                        st.dataframe(
+                            review_improved_frame[["code", "name", "score", "persistence"]].rename(
+                                columns={"code": "代码", "name": "名称", "score": "综合分", "persistence": "持续性"}
+                            ), hide_index=True, width="stretch",
+                        )
 
 
 cfg = make_config()
@@ -394,8 +438,11 @@ if scan_mode is None:
         rational_frame=validation_store.staged_frame(today),
         final_frame=validation_store.final_frame(today),
         scan_status_frame=validation_store.scan_status_frame(today),
+        review_status_frame=validation_store.review_status_frame(today),
+        review_strict_frame=validation_store.review_frame(today, "strict"),
+        review_improved_frame=validation_store.review_frame(today, "improved"),
     )
-    st.caption("后台任务将在14:30、14:45和14:52依次写入三个原始结果区，14:52后生成加权最终结果。")
+    st.caption("14:52先生成冻结决策版并推送；随后继续原架构完整重扫，复核结果单独保存且不覆盖决策版。")
     st.stop()
 
 scan_mode_label = "严格标准" if scan_mode == "strict" else "改进流程"
@@ -466,6 +513,9 @@ if not use_demo and in_scan_window:
         rational_frame=validation_store.staged_frame(today),
         final_frame=validation_store.final_frame(today),
         scan_status_frame=validation_store.scan_status_frame(today),
+        review_status_frame=validation_store.review_status_frame(today),
+        review_strict_frame=validation_store.review_frame(today, "strict"),
+        review_improved_frame=validation_store.review_frame(today, "improved"),
     )
 else:
     demo_container = st.container(border=True)

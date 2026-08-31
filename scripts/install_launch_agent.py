@@ -109,7 +109,7 @@ def main() -> None:
         install_agent(domain, scan_plist, label, scan_payload)
 
     print(f"后台环境：{install_dir}")
-    print("已安装：工作日14:30、14:45静默采样，14:52生成严格与改进两套结果；09:45、10:30自动校验。")
+    print("已安装：工作日14:30、14:45静默采样；14:52先生成冻结决策版，再运行严格与改进两套完整复核；09:45、10:30自动校验。")
 
 
 if __name__ == "__main__":

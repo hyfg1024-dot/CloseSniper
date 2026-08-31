@@ -205,3 +205,51 @@ def format_scan_issue_message(
         "系统已自动重试，仍未取得完整行情；今日不生成三时点加权名单。",
         "请勿把“无结果”理解为“扫描成功且无候选”。",
     ])
+
+
+def format_fast_decision_message(
+    *,
+    trade_date: str,
+    candidates: pd.DataFrame | Iterable[dict[str, Any]],
+    generated_at: datetime | None = None,
+) -> str:
+    rows = _records(candidates)
+    lines = [
+        f"⚡ CloseSniper｜{trade_date} 14:52冻结决策版",
+        f"完成时间：{(generated_at or datetime.now()):%H:%M:%S}",
+        "口径：仅复核14:45已入选股票，严格冻结14:52数据。",
+        "",
+        f"【改进流程｜准时名单】{len(rows)}只",
+    ]
+    if rows:
+        for index, item in enumerate(rows, 1):
+            lines.append(
+                f"{index}. {item.get('name', '—')}（{item.get('code', '—')}）"
+                f"｜综合{_number(item.get('composite_score', item.get('score')))}"
+                f"｜{item.get('persistence', '—')}"
+            )
+    else:
+        lines.append("无符合条件股票")
+    lines.extend(["", "完整重扫版将在后台完成后另行发送。", "仅供策略研究，不构成投资建议。"])
+    return "\n".join(lines)
+
+
+def format_review_message(
+    *,
+    trade_date: str,
+    strict_candidates: pd.DataFrame | Iterable[dict[str, Any]],
+    improved_candidates: pd.DataFrame | Iterable[dict[str, Any]],
+    generated_at: datetime | None = None,
+) -> str:
+    message = format_final_message(
+        trade_date=trade_date,
+        strict_candidates=strict_candidates,
+        rational_candidates=improved_candidates,
+        generated_at=generated_at,
+    )
+    return (
+        message
+        .replace("尾盘结果", "完整重扫复核版", 1)
+        .replace("【严格标准｜14:52】", "【完整重扫｜严格标准】", 1)
+        .replace("【改进流程｜三时点加权】", "【完整重扫｜改进流程】", 1)
+    )

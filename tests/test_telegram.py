@@ -9,6 +9,8 @@ import pandas as pd
 from src.telegram_service import (
     TelegramSettings,
     format_final_message,
+    format_fast_decision_message,
+    format_review_message,
     format_scan_issue_message,
     load_settings,
     save_settings,
@@ -59,6 +61,21 @@ class TelegramTests(unittest.TestCase):
         self.assertIn("未形成最终结果", message)
         self.assertIn("14:30、14:45", message)
         self.assertIn("请勿把“无结果”理解为“扫描成功且无候选”", message)
+
+    def test_dual_messages_are_clearly_labeled(self) -> None:
+        fast = format_fast_decision_message(
+            trade_date="2026-08-31", candidates=[],
+            generated_at=datetime(2026, 8, 31, 14, 52, 30),
+        )
+        review = format_review_message(
+            trade_date="2026-08-31", strict_candidates=[], improved_candidates=[],
+            generated_at=datetime(2026, 8, 31, 14, 57),
+        )
+
+        self.assertIn("14:52冻结决策版", fast)
+        self.assertIn("完整重扫版将在后台完成后另行发送", fast)
+        self.assertIn("完整重扫复核版", review)
+        self.assertIn("完整重扫｜严格标准", review)
 
 
 if __name__ == "__main__":

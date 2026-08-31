@@ -156,6 +156,32 @@ class ValidationStore:
                     error_message TEXT,
                     PRIMARY KEY (trade_date, slot)
                 );
+                CREATE TABLE IF NOT EXISTS review_scans (
+                    id INTEGER PRIMARY KEY,
+                    trade_date TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    provider TEXT,
+                    market_count INTEGER,
+                    hard_count INTEGER,
+                    error_message TEXT
+                );
+                CREATE TABLE IF NOT EXISTS review_candidates (
+                    id INTEGER PRIMARY KEY,
+                    review_scan_id INTEGER NOT NULL REFERENCES review_scans(id) ON DELETE CASCADE,
+                    mode TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    score REAL NOT NULL,
+                    score_1430 REAL,
+                    score_1445 REAL,
+                    score_1452 REAL,
+                    appearances INTEGER,
+                    persistence TEXT,
+                    UNIQUE(review_scan_id, mode, code)
+                );
                 """
             )
             existing = {
@@ -283,6 +309,145 @@ class ValidationStore:
         """
         with self.connect() as db:
             return pd.read_sql_query(query, db, params=(trade_date,))
+
+    def staged_slot_exists(self, trade_date: str, slot: str) -> bool:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM staged_scans WHERE trade_date=? AND slot=?",
+                (trade_date, slot),
+            ).fetchone()
+        return row is not None
+
+    def staged_candidate_codes(self, trade_date: str, slot: str) -> list[str]:
+        query = """
+            SELECT c.code FROM staged_candidates c
+            JOIN staged_scans ss ON ss.id=c.staged_scan_id
+            WHERE ss.trade_date=? AND ss.slot=?
+            ORDER BY c.score DESC
+        """
+        with self.connect() as db:
+            return [str(row["code"]) for row in db.execute(query, (trade_date, slot)).fetchall()]
+
+    def record_review_run(
+        self,
+        *,
+        trade_date: str,
+        status: str,
+        started_at: datetime,
+        completed_at: datetime | None = None,
+        provider: str | None = None,
+        market_count: int | None = None,
+        hard_count: int | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO review_scans
+                (trade_date, status, started_at, completed_at, provider, market_count, hard_count, error_message)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trade_date) DO UPDATE SET
+                    status=excluded.status, started_at=excluded.started_at,
+                    completed_at=excluded.completed_at, provider=excluded.provider,
+                    market_count=excluded.market_count, hard_count=excluded.hard_count,
+                    error_message=excluded.error_message
+                """,
+                (
+                    trade_date, status, started_at.isoformat(timespec="seconds"),
+                    completed_at.isoformat(timespec="seconds") if completed_at else None,
+                    provider, market_count, hard_count,
+                    error_message[:1000] if error_message else None,
+                ),
+            )
+
+    def save_review_results(
+        self,
+        *,
+        trade_date: str,
+        started_at: datetime,
+        completed_at: datetime,
+        provider: str,
+        market_count: int,
+        hard_count: int,
+        strict_candidates: Iterable[dict[str, Any]],
+        improved_candidates: Iterable[dict[str, Any]],
+    ) -> None:
+        self.record_review_run(
+            trade_date=trade_date, status="success", started_at=started_at,
+            completed_at=completed_at, provider=provider,
+            market_count=market_count, hard_count=hard_count,
+        )
+        strict_rows = list(strict_candidates)
+        improved_rows = list(improved_candidates)
+        with self.connect() as db:
+            scan_id = int(db.execute(
+                "SELECT id FROM review_scans WHERE trade_date=?", (trade_date,)
+            ).fetchone()["id"])
+            db.execute("DELETE FROM review_candidates WHERE review_scan_id=?", (scan_id,))
+            db.executemany(
+                """
+                INSERT INTO review_candidates
+                (review_scan_id, mode, code, name, entry_price, score, score_1452, appearances, persistence)
+                VALUES (?, 'strict', ?, ?, ?, ?, ?, 1, '14:52完整重扫')
+                """,
+                [
+                    (scan_id, str(item["code"]), str(item["name"]), float(item["price"]),
+                     float(item["score"]), float(item["score"]))
+                    for item in strict_rows
+                ],
+            )
+            for item in improved_rows:
+                scores: dict[str, float | None] = {"1452": float(item["score"])}
+                for slot in ("1430", "1445"):
+                    row = db.execute(
+                        """
+                        SELECT c.score FROM staged_candidates c
+                        JOIN staged_scans ss ON ss.id=c.staged_scan_id
+                        WHERE ss.trade_date=? AND ss.slot=? AND c.code=?
+                        """,
+                        (trade_date, slot, str(item["code"])),
+                    ).fetchone()
+                    scores[slot] = float(row["score"]) if row else None
+                if scores["1445"] is None:
+                    continue
+                appearances = sum(value is not None for value in scores.values())
+                composite = round(
+                    0.20 * (scores["1430"] or 0)
+                    + 0.30 * (scores["1445"] or 0)
+                    + 0.50 * scores["1452"],
+                    1,
+                )
+                db.execute(
+                    """
+                    INSERT INTO review_candidates
+                    (review_scan_id, mode, code, name, entry_price, score,
+                     score_1430, score_1445, score_1452, appearances, persistence)
+                    VALUES (?, 'improved', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scan_id, str(item["code"]), str(item["name"]), float(item["price"]),
+                        composite, scores["1430"], scores["1445"], scores["1452"],
+                        appearances, "三次稳定" if appearances == 3 else "连续两次",
+                    ),
+                )
+
+    def review_status_frame(self, trade_date: str) -> pd.DataFrame:
+        with self.connect() as db:
+            return pd.read_sql_query(
+                "SELECT * FROM review_scans WHERE trade_date=?", db, params=(trade_date,)
+            )
+
+    def review_frame(self, trade_date: str, mode: str) -> pd.DataFrame:
+        query = """
+            SELECT c.code, c.name, c.entry_price, c.score,
+                   c.score_1430, c.score_1445, c.score_1452,
+                   c.appearances, c.persistence
+            FROM review_candidates c JOIN review_scans rs ON rs.id=c.review_scan_id
+            WHERE rs.trade_date=? AND c.mode=?
+            ORDER BY c.score DESC
+        """
+        with self.connect() as db:
+            return pd.read_sql_query(query, db, params=(trade_date, mode))
 
     def finalize_staged_day(self, trade_date: str) -> bool:
         """以14:52候选为门槛生成最终名单；返回 True 表示首次生成。"""

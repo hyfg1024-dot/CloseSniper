@@ -128,6 +128,69 @@ class AkshareSource:
         frame.attrs["provider"] = "腾讯财经"
         return frame
 
+    def fast_spot(self, codes: list[str], *, timeout: float = 5.0) -> pd.DataFrame:
+        """一次请求读取候选池报价，供14:52冻结版做增量确认。"""
+        if not codes:
+            return pd.DataFrame()
+        symbols = [self._market_symbol(str(code).zfill(6)) for code in codes]
+        response = requests.get(
+            "https://qt.gtimg.cn/q=" + ",".join(symbols),
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        text = response.content.decode("gbk", errors="replace")
+        rows: list[dict] = []
+        for line in text.splitlines():
+            if '="' not in line:
+                continue
+            payload = line.split('="', 1)[1].rsplit('"', 1)[0].split("~")
+            if len(payload) < 58 or not payload[2]:
+                continue
+
+            def number(index: int) -> float:
+                try:
+                    return float(payload[index])
+                except (IndexError, TypeError, ValueError):
+                    return float("nan")
+
+            price = number(3)
+            previous = number(4)
+            rows.append({
+                "代码": str(payload[2]).zfill(6),
+                "名称": payload[1],
+                "最新价": price,
+                "涨跌幅": number(32),
+                "量比": number(49),
+                "换手率": number(38),
+                "流通市值": number(45) * 1e8,
+                "成交量": number(36) * 100,
+                "成交额": number(57) * 10_000,
+                "最高": number(33),
+                "最低": number(34),
+                "今开": number(5),
+                "昨收": previous,
+                "报价时间": payload[30],
+            })
+        frame = pd.DataFrame(rows)
+        received = set(frame.get("代码", pd.Series(dtype=str)).astype(str))
+        missing = sorted(set(str(code).zfill(6) for code in codes) - received)
+        if missing:
+            raise MarketDataError(f"腾讯候选报价不完整，缺少：{', '.join(missing)}")
+        frame.attrs["provider"] = "腾讯候选池增量报价"
+        return frame
+
+    def fast_index_return(self, *, timeout: float = 5.0) -> tuple[float, str]:
+        response = requests.get("https://qt.gtimg.cn/q=sh000001", timeout=timeout)
+        response.raise_for_status()
+        text = response.content.decode("gbk", errors="replace")
+        if '="' not in text:
+            raise MarketDataError("腾讯上证指数报价格式异常")
+        payload = text.split('="', 1)[1].rsplit('"', 1)[0].split("~")
+        try:
+            return float(payload[32]), str(payload[30])
+        except (IndexError, TypeError, ValueError) as exc:
+            raise MarketDataError("腾讯上证指数报价字段不完整") from exc
+
     @staticmethod
     def _sina_spot() -> pd.DataFrame:
         """读取新浪全市场快照，并保留流通市值与换手率。"""
@@ -218,6 +281,17 @@ class AkshareSource:
         time_column = "day" if "day" in frame.columns else "时间"
         return frame[frame[time_column].astype(str).str.startswith(day)].copy()
 
+    def minute_fast(self, code: str, cutoff_at: datetime) -> pd.DataFrame:
+        """冻结版直接读取东财当日分钟线；接口自带15秒超时，避免新浪请求无限等待。"""
+        day = cutoff_at.strftime("%Y-%m-%d")
+        return self.ak.stock_zh_a_hist_min_em(
+            symbol=code,
+            start_date=f"{day} 09:30:00",
+            end_date=cutoff_at.strftime("%Y-%m-%d %H:%M:%S"),
+            period="1",
+            adjust="",
+        )
+
     def minute_recent(self, code: str) -> pd.DataFrame:
         symbol = self._market_symbol(code)
         try:
@@ -237,6 +311,15 @@ class AkshareSource:
         day = datetime.now().strftime("%Y-%m-%d")
         time_column = "day" if "day" in frame.columns else "时间"
         return frame[frame[time_column].astype(str).str.startswith(day)].copy()
+
+    def index_minute_fast(self, cutoff_at: datetime) -> pd.DataFrame:
+        day = cutoff_at.strftime("%Y-%m-%d")
+        return self.ak.index_zh_a_hist_min_em(
+            symbol="000001",
+            period="1",
+            start_date=f"{day} 09:30:00",
+            end_date=cutoff_at.strftime("%Y-%m-%d %H:%M:%S"),
+        )
 
     def index_minute_recent(self) -> pd.DataFrame:
         try:

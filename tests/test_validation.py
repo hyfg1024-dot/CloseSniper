@@ -141,6 +141,39 @@ class ValidationTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(count, 1)
 
+    def test_full_review_is_stored_without_overwriting_fast_official_result(self):
+        def candidate(code: str, score: float, price: float = 10.0):
+            return {
+                "code": code, "name": f"股票{code}", "price": price, "score": score,
+                "change_pct": 4.0, "volume_ratio": 1.5, "turnover": 7.0,
+                "float_cap_yi": 100,
+            }
+
+        common = dict(provider="测试", market_count=5000, hard_count=20, config={})
+        for slot, minute, score in (("1430", 30, 80), ("1445", 45, 85), ("1452", 52, 90)):
+            self.store.save_staged_scan(
+                slot=slot, scanned_at=datetime(2026, 8, 3, 14, minute),
+                candidates=[candidate("600001", score)], **common,
+            )
+        self.assertTrue(self.store.finalize_staged_day("2026-08-03"))
+
+        self.store.save_review_results(
+            trade_date="2026-08-03",
+            started_at=datetime(2026, 8, 3, 14, 52),
+            completed_at=datetime(2026, 8, 3, 14, 57),
+            provider="完整重扫", market_count=5000, hard_count=30,
+            strict_candidates=[candidate("600009", 92)],
+            improved_candidates=[candidate("600001", 88), candidate("600008", 95)],
+        )
+
+        official = self.store.final_frame("2026-08-03")
+        self.assertEqual(official["code"].tolist(), ["600001"])
+        self.assertAlmostEqual(official.iloc[0]["composite_score"], 86.5)
+        self.assertEqual(self.store.review_frame("2026-08-03", "strict")["code"].tolist(), ["600009"])
+        reviewed = self.store.review_frame("2026-08-03", "improved")
+        self.assertEqual(reviewed["code"].tolist(), ["600001"])
+        self.assertAlmostEqual(reviewed.iloc[0]["score"], 85.5)
+
     def test_strict_daily_result_keeps_latest_slot_under_its_own_mode(self):
         common = dict(provider="测试")
         self.store.save_strict_scan(
