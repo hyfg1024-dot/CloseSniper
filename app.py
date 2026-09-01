@@ -410,6 +410,16 @@ workspace = st.segmented_control(
     width="stretch",
 )
 validation_store = ValidationStore()
+
+
+def optional_store_frame(store: ValidationStore, method_name: str, *args: str) -> pd.DataFrame:
+    """兼容 Streamlit 热更新期间仍存活的旧 ValidationStore 实例。"""
+    method = getattr(store, method_name, None)
+    if not callable(method):
+        return pd.DataFrame()
+    return method(*args)
+
+
 if workspace == "次日校验":
     render_validation_page(validation_store)
     st.stop()
@@ -438,9 +448,9 @@ if scan_mode is None:
         rational_frame=validation_store.staged_frame(today),
         final_frame=validation_store.final_frame(today),
         scan_status_frame=validation_store.scan_status_frame(today),
-        review_status_frame=validation_store.review_status_frame(today),
-        review_strict_frame=validation_store.review_frame(today, "strict"),
-        review_improved_frame=validation_store.review_frame(today, "improved"),
+        review_status_frame=optional_store_frame(validation_store, "review_status_frame", today),
+        review_strict_frame=optional_store_frame(validation_store, "review_frame", today, "strict"),
+        review_improved_frame=optional_store_frame(validation_store, "review_frame", today, "improved"),
     )
     st.caption("14:52先生成冻结决策版并推送；随后继续原架构完整重扫，复核结果单独保存且不覆盖决策版。")
     st.stop()
@@ -513,9 +523,9 @@ if not use_demo and in_scan_window:
         rational_frame=validation_store.staged_frame(today),
         final_frame=validation_store.final_frame(today),
         scan_status_frame=validation_store.scan_status_frame(today),
-        review_status_frame=validation_store.review_status_frame(today),
-        review_strict_frame=validation_store.review_frame(today, "strict"),
-        review_improved_frame=validation_store.review_frame(today, "improved"),
+        review_status_frame=optional_store_frame(validation_store, "review_status_frame", today),
+        review_strict_frame=optional_store_frame(validation_store, "review_frame", today, "strict"),
+        review_improved_frame=optional_store_frame(validation_store, "review_frame", today, "improved"),
     )
 else:
     demo_container = st.container(border=True)
