@@ -155,6 +155,7 @@ class ResilienceTests(unittest.TestCase):
             self.assertEqual(payload["fast"], 0)
             self.assertTrue(payload["finalized"])
             self.assertTrue(store.final_frame("2026-08-21").empty)
+            self.assertEqual(payload["telegram"], "suppressed_risk_only")
 
 
 if __name__ == "__main__":

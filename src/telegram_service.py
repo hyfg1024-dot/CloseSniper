@@ -309,15 +309,29 @@ def format_review_message(
     improved_candidates: pd.DataFrame | Iterable[dict[str, Any]],
     generated_at: datetime | None = None,
 ) -> str:
-    message = format_final_message(
-        trade_date=trade_date,
-        strict_candidates=strict_candidates,
-        rational_candidates=improved_candidates,
-        generated_at=generated_at,
-    )
-    return (
-        message
-        .replace("尾盘结果", "完整重扫复核版", 1)
-        .replace("【严格标准｜14:52】", "【完整重扫｜严格标准】", 1)
-        .replace("【改进流程｜三时点加权】", "【完整重扫｜改进流程】", 1)
-    )
+    # Keep the argument for compatibility with existing callers/storage, but
+    # never expose improved-flow candidates in Telegram.  That flow is a web
+    # risk/reference tool rather than a recommendation source.
+    del improved_candidates
+    strict = _records(strict_candidates)
+    lines = [
+        f"🎯 CloseSniper｜{trade_date} 严格标准完整复核",
+        f"完成时间：{(generated_at or datetime.now()):%H:%M:%S}",
+        "",
+        f"【完整重扫｜严格标准】{len(strict)}只",
+    ]
+    if strict:
+        for index, item in enumerate(strict, 1):
+            price = item.get("price", item.get("entry_price"))
+            lines.append(
+                f"{index}. {item.get('name', '—')}（{item.get('code', '—')}）"
+                f"｜评分{_number(item.get('score'))}｜信号价{_number(price)}"
+            )
+    else:
+        lines.append("无符合条件股票")
+    lines.extend([
+        "",
+        "改进流程仅保留在网页中作为风险辅助，不纳入 Telegram 推送。",
+        "仅供策略研究，不构成投资建议。",
+    ])
+    return "\n".join(lines)

@@ -20,7 +20,6 @@ from src.scan_service import (
 from src.strategy import StrategyConfig
 from src.telegram_service import (
     TelegramError,
-    format_fast_decision_message,
     format_review_message,
     format_scan_issue_message,
     format_strict_watch_message,
@@ -267,14 +266,9 @@ def run_fast_final(
             reason="缺少三时点快照，无法生成冻结决策版", now=scan_now,
         )
     else:
-        final = store.final_frame(trade_date)
-        telegram = send_once(
-            store=store, trade_date=trade_date, channel="telegram-fast",
-            message=format_fast_decision_message(
-                trade_date=trade_date, candidates=final, generated_at=scan_now,
-            ),
-            sent_at=scan_now,
-        )
+        # The improved flow is a risk/reference screen only.  It must not be
+        # delivered as a 14:52 recommendation, including when it is empty.
+        telegram = "suppressed_risk_only"
     return {
         "status": "ok", "fast": len(candidates), "eligible": len(eligible_codes),
         "finalized": finalized, "attempts": attempts, "telegram": telegram,

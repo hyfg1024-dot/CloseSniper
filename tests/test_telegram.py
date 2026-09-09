@@ -76,8 +76,10 @@ class TelegramTests(unittest.TestCase):
 
         self.assertIn("14:52冻结决策版", fast)
         self.assertIn("完整重扫版将在后台完成后另行发送", fast)
-        self.assertIn("完整重扫复核版", review)
+        self.assertIn("严格标准完整复核", review)
         self.assertIn("完整重扫｜严格标准", review)
+        self.assertIn("风险辅助", review)
+        self.assertNotIn("完整重扫｜改进流程", review)
 
     def test_strict_watch_message_is_explicitly_not_final(self) -> None:
         message = format_strict_watch_message(
