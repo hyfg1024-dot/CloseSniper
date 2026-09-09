@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from src.data_source import AkshareSource, MarketDataError
+from src.ai_observer import analyze_watchlist
 from src.scan_service import (
     ScanResult,
     derive_strict_frame,
@@ -164,13 +165,17 @@ def run_regular_slot(
     )
     telegram = "not_due"
     if slot == "1445":
+        watchlist = store.strict_two_stage_frame(scan_now.date().isoformat())
+        analyses = analyze_watchlist(watchlist, strict_frame.to_dict("records"))
+        store.save_ai_observations(scan_now.date().isoformat(), watchlist, analyses)
         telegram = send_once(
             store=store,
             trade_date=scan_now.date().isoformat(),
             channel="telegram-strict-watch-1445",
             message=format_strict_watch_message(
                 trade_date=scan_now.date().isoformat(),
-                candidates=store.strict_two_stage_frame(scan_now.date().isoformat()),
+                candidates=watchlist,
+                analyses=analyses,
                 generated_at=scan_now,
             ),
             sent_at=scan_now,

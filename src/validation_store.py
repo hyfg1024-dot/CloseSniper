@@ -143,6 +143,19 @@ class ValidationStore:
                     sent_at TEXT NOT NULL,
                     UNIQUE(trade_date, channel)
                 );
+                CREATE TABLE IF NOT EXISTS ai_observations (
+                    id INTEGER PRIMARY KEY,
+                    trade_date TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    verdict TEXT NOT NULL,
+                    report_json TEXT NOT NULL,
+                    context_json TEXT NOT NULL,
+                    error_message TEXT,
+                    UNIQUE(trade_date, code)
+                );
                 CREATE TABLE IF NOT EXISTS scan_runs (
                     trade_date TEXT NOT NULL,
                     slot TEXT NOT NULL,
@@ -751,6 +764,49 @@ class ValidationStore:
             JOIN strict_candidates b ON b.strict_scan_id=sb.id AND b.code=a.code
             WHERE sa.trade_date=? AND sa.slot='1430'
             ORDER BY watch_score DESC, b.score DESC
+        """
+        with self.connect() as db:
+            return pd.read_sql_query(query, db, params=(trade_date,))
+
+    def save_ai_observations(
+        self,
+        trade_date: str,
+        candidates: pd.DataFrame,
+        analyses: dict[str, dict[str, Any]],
+        contexts: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        if candidates.empty or not analyses:
+            return
+        contexts = contexts or {}
+        with self.connect() as db:
+            for item in candidates.to_dict("records"):
+                code = str(item.get("code", "")).zfill(6)
+                result = analyses.get(code)
+                if not result:
+                    continue
+                db.execute(
+                    """
+                    INSERT INTO ai_observations
+                    (trade_date, code, name, generated_at, model, verdict, report_json, context_json, error_message)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(trade_date, code) DO UPDATE SET
+                        generated_at=excluded.generated_at, model=excluded.model, verdict=excluded.verdict,
+                        report_json=excluded.report_json, context_json=excluded.context_json,
+                        error_message=excluded.error_message
+                    """,
+                    (
+                        trade_date, code, str(item.get("name", "")),
+                        str(result.get("generated_at") or datetime.now().isoformat(timespec="seconds")),
+                        str(result.get("model") or "deepseek-chat"), str(result.get("verdict") or "谨慎观察"),
+                        json.dumps(result, ensure_ascii=False), json.dumps(contexts.get(code, {}), ensure_ascii=False),
+                        str(result.get("error") or "")[:1000] or None,
+                    ),
+                )
+
+    def ai_observation_frame(self, trade_date: str) -> pd.DataFrame:
+        query = """
+            SELECT code, name, generated_at, model, verdict, report_json, error_message
+            FROM ai_observations WHERE trade_date=? ORDER BY code
         """
         with self.connect() as db:
             return pd.read_sql_query(query, db, params=(trade_date,))

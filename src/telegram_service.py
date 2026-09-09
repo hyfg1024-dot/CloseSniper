@@ -238,10 +238,12 @@ def format_strict_watch_message(
     *,
     trade_date: str,
     candidates: pd.DataFrame | Iterable[dict[str, Any]],
+    analyses: dict[str, dict[str, Any]] | None = None,
     generated_at: datetime | None = None,
 ) -> str:
     """A deliberately non-actionable early alert before the 14:52 final confirmation."""
     rows = _records(candidates)
+    analyses = analyses or {}
     lines = [
         f"👀 CloseSniper｜{trade_date} 严格标准观察提醒",
         f"确认时间：{(generated_at or datetime.now()):%H:%M:%S}",
@@ -252,6 +254,7 @@ def format_strict_watch_message(
     ]
     if rows:
         for index, item in enumerate(rows, 1):
+            analysis = analyses.get(str(item.get("code", "")).zfill(6), {})
             lines.append(
                 f"{index}. {item.get('name', '—')}（{item.get('code', '—')}）"
                 f"｜观察分 {_number(item.get('watch_score'))}"
@@ -259,6 +262,15 @@ def format_strict_watch_message(
                 f"｜14:45 {_number(item.get('score_1445'))}"
                 f"｜现价 {_number(item.get('entry_price', item.get('price')))}"
             )
+            if analysis:
+                lines.append(f"   AI观察：{analysis.get('verdict', '谨慎观察')}")
+                for reason in list(analysis.get("strengths") or [])[:2]:
+                    lines.append(f"   · {reason}")
+                for risk in list(analysis.get("risks") or [])[:1]:
+                    lines.append(f"   风险：{risk}")
+                conditions = list(analysis.get("confirm_before_1452") or [])[:1]
+                if conditions:
+                    lines.append(f"   14:52确认：{conditions[0]}")
     else:
         lines.append("无连续两次符合的股票")
     lines.extend(["", "仅供策略研究，不构成投资建议。"])

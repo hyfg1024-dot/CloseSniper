@@ -91,6 +91,18 @@ class TelegramTests(unittest.TestCase):
         self.assertIn("不是最终买入名单", message)
         self.assertIn("观察股（600001）", message)
 
+    def test_strict_watch_message_can_include_ai_observation(self) -> None:
+        message = format_strict_watch_message(
+            trade_date="2026-09-09",
+            candidates=[{"code": "600001", "name": "观察股", "watch_score": 80}],
+            analyses={"600001": {
+                "verdict": "继续观察", "strengths": ["量比 1.8"],
+                "risks": ["接近日内高点"], "confirm_before_1452": ["不跌破均价线"],
+            }},
+        )
+        self.assertIn("AI观察：继续观察", message)
+        self.assertIn("14:52确认：不跌破均价线", message)
+
 
 if __name__ == "__main__":
     unittest.main()

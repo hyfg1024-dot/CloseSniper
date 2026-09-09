@@ -27,6 +27,7 @@ from src.telegram_service import (
 )
 from src.validation_store import ValidationStore
 from src.validation_ui import render_history_page, render_validation_page
+from src.ai_observer import AIObserverSettings, load_settings as load_ai_settings, save_settings as save_ai_settings
 
 
 st.set_page_config(page_title="尾盘狙击 · CloseSniper", page_icon="◉", layout="wide", initial_sidebar_state="expanded")
@@ -232,6 +233,26 @@ def render_telegram_settings() -> None:
                 st.error(str(exc))
 
 
+def render_ai_observer_settings() -> None:
+    settings = load_ai_settings()
+    with st.sidebar.expander("AI 观察解读（DeepSeek）"):
+        st.caption("仅分析严格标准 14:30、14:45 连续两次稳定的股票；不预测涨跌、不替代14:52确认。")
+        if settings.configured:
+            st.caption("已保存本机 API Key。" + ("自动解读已开启。" if settings.enabled else "自动解读已暂停。"))
+        with st.form("ai_observer_settings"):
+            key_input = st.text_input("DeepSeek API Key", type="password", placeholder="已保存时可留空")
+            enabled = st.toggle("14:45 自动生成观察解读", value=settings.enabled if settings.configured else False)
+            saved = st.form_submit_button("保存 AI 设置", width="stretch")
+        if saved:
+            api_key = key_input.strip() or settings.api_key
+            if enabled and not api_key:
+                st.warning("开启自动解读前，请输入 DeepSeek API Key。")
+            else:
+                save_ai_settings(AIObserverSettings(api_key=api_key, enabled=enabled))
+                st.success("AI 观察设置已保存到本机。")
+                st.rerun()
+
+
 def render_daily_result_panel(
     container,
     title: str,
@@ -363,6 +384,25 @@ def render_today_decision(
         st.markdown(f'<div class="decision-card risk"><b>改进流程 · 风险提示</b><p class="muted">{message}</p>{chips}</div>', unsafe_allow_html=True)
 
 
+def render_ai_observation_panel(frame: pd.DataFrame) -> None:
+    if frame.empty:
+        return
+    st.markdown('<div class="page-section"><h2>AI 观察解读</h2><p class="decision-note">只解释已抓取的免费行情事实；作为14:52前的观察提示，不构成买卖建议。</p></div>', unsafe_allow_html=True)
+    for item in frame.to_dict("records"):
+        try:
+            report = json.loads(str(item.get("report_json") or "{}"))
+        except json.JSONDecodeError:
+            report = {}
+        strengths = "<br>".join(f"· {value}" for value in report.get("strengths", [])[:3]) or "· 暂无可用依据"
+        risks = "<br>".join(f"· {value}" for value in report.get("risks", [])[:2]) or "· 暂无额外风险提示"
+        confirms = "<br>".join(f"· {value}" for value in report.get("confirm_before_1452", [])[:2]) or "· 等待严格标准第三次确认"
+        st.markdown(
+            f'<div class="card"><span class="eyebrow">AI · {item["code"]}</span><h3>{item["name"]} · {item["verdict"]}</h3>'
+            f'<b>事实依据</b><br>{strengths}<br><br><b>风险</b><br>{risks}<br><br><b>14:52确认</b><br>{confirms}</div>',
+            unsafe_allow_html=True,
+        )
+
+
 def render_daily_timeline(
     *,
     strict_frame: pd.DataFrame,
@@ -476,6 +516,7 @@ cfg = make_config()
 status, status_note = market_session_status()
 st.sidebar.markdown("---")
 render_telegram_settings()
+render_ai_observer_settings()
 use_demo = st.sidebar.toggle("演示数据", value=False, help="网络异常或非交易时段可体验完整流程")
 with st.sidebar.expander("排除规则"):
     st.write("ST / *ST、退市整理、上市首日 N/C、北交所股票。停牌或字段缺失股票自动跳过。")
@@ -544,6 +585,7 @@ if scan_mode is None:
         rational_final=final_today,
         scan_status_frame=status_today,
     )
+    render_ai_observation_panel(validation_store.ai_observation_frame(today))
     with st.expander("查看三次扫描记录与完整复核", expanded=False):
         render_daily_timeline(
             strict_frame=strict_today,
@@ -629,6 +671,7 @@ if not use_demo and in_scan_window:
         rational_final=final_today,
         scan_status_frame=status_today,
     )
+    render_ai_observation_panel(validation_store.ai_observation_frame(today))
     with st.expander("查看三次扫描记录与完整复核", expanded=False):
         render_daily_timeline(
             strict_frame=strict_today,
