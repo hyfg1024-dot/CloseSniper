@@ -176,33 +176,52 @@ def _render_strict_three_stage_half_hour(
 ) -> None:
     """严格口径单独统计，避免与改进流程的最终名单混算。"""
     st.markdown(f"### {heading}")
-    st.caption("只统计 14:30、14:45、14:52 三次均入选的严格标准股票；开盘半小时固定为次日 9:30 开盘至 10:00 收盘。")
-    completed = frame.dropna(subset=["return_1000"]).copy() if not frame.empty else pd.DataFrame()
+    st.caption("只统计 14:30、14:45、14:52 三次均入选的严格标准股票。三段口径：开盘首分钟相对信号价、9:35–10:00 区间、10:00–10:30 区间。盈亏比＝平均盈利 ÷ 平均亏损绝对值。")
+    completed = frame.dropna(subset=["validation_date"]).copy() if not frame.empty else pd.DataFrame()
     if completed.empty:
         waiting = len(pending_rows)
         st.info(f"已冻结三次稳定信号 {len(frame)} 只；待补齐开盘半小时数据 {waiting} 只。")
         return
-    win_rate = float((completed["return_1000"] > 0).mean() * 100)
-    mean_return = float(completed["return_1000"].mean())
-    median_return = float(completed["return_1000"].median())
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("已完成样本", f"{len(completed)} 只")
-    m2.metric("开盘半小时盈利概率", f"{win_rate:.1f}%")
-    m3.metric("平均收益（至10:00）", _format_return(mean_return))
-    m4.metric("收益中位数", _format_return(median_return))
+    for column, label, container in (
+        ("open_return", "开盘首分钟", m2),
+        ("return_0530", "5–30分钟", m3),
+        ("return_3160", "31–60分钟", m4),
+    ):
+        values = completed[column].dropna()
+        if values.empty:
+            container.metric(f"{label}盈利概率", "—", delta="暂无完整分钟数据", delta_color="off")
+            continue
+        win_rate = float((values > 0).mean() * 100)
+        payoff = _payoff_ratio(values)
+        container.metric(
+            f"{label}盈利概率", f"{win_rate:.1f}%",
+            delta=(
+                f"样本 {len(values)}｜盈亏比 {payoff:.2f}:1"
+                if payoff is not None
+                else f"样本 {len(values)}｜盈亏比 —"
+            ),
+            delta_color="off",
+        )
     display = completed.rename(columns={
         "signal_date": "信号日", "validation_date": "校验日", "code": "代码", "name": "名称",
         "entry_price": "信号价", "composite_score": "严格综合评分",
         "score_1430": "14:30评分", "score_1445": "14:45评分", "score_1452": "14:52评分",
-        "open_return": "9:30涨跌", "return_1000": "10:00涨跌",
+        "open_return": "开盘首分钟涨跌", "return_0530": "5–30分钟涨跌",
+        "return_3160": "31–60分钟涨跌", "return_1000": "至10:00收益",
         "max_return_1000": "半小时最高涨幅", "max_drawdown_1000": "半小时最低涨跌",
     })
     columns = [
         "信号日", "校验日", "代码", "名称", "严格综合评分",
         "14:30评分", "14:45评分", "14:52评分", "信号价",
-        "9:30涨跌", "10:00涨跌", "半小时最高涨幅", "半小时最低涨跌",
+        "开盘首分钟涨跌", "5–30分钟涨跌", "31–60分钟涨跌", "至10:00收益",
+        "半小时最高涨幅", "半小时最低涨跌",
     ]
-    returns = ["9:30涨跌", "10:00涨跌", "半小时最高涨幅", "半小时最低涨跌"]
+    returns = [
+        "开盘首分钟涨跌", "5–30分钟涨跌", "31–60分钟涨跌", "至10:00收益",
+        "半小时最高涨幅", "半小时最低涨跌",
+    ]
     st.dataframe(
         display[columns].style.map(_return_color, subset=returns).format(
             {column: _format_return for column in returns}, na_rep="—"
@@ -333,6 +352,15 @@ def _render_definition() -> None:
 def _positive_rate(series: pd.Series) -> float | None:
     values = series.dropna()
     return float((values > 0).mean() * 100) if not values.empty else None
+
+
+def _payoff_ratio(series: pd.Series) -> float | None:
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    profits = values[values > 0]
+    losses = values[values < 0]
+    if profits.empty or losses.empty:
+        return None
+    return float(profits.mean() / abs(losses.mean()))
 
 
 def _return_color(value: object) -> str:

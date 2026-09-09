@@ -207,6 +207,10 @@ class ValidationStore:
                     return_1000 REAL NOT NULL,
                     max_return_1000 REAL NOT NULL,
                     max_drawdown_1000 REAL NOT NULL,
+                    price_0935 REAL,
+                    price_1030 REAL,
+                    return_0530 REAL,
+                    return_3160 REAL,
                     calculated_at TEXT NOT NULL
                 );
                 """
@@ -232,6 +236,13 @@ class ValidationStore:
                 db.execute("ALTER TABLE signals ADD COLUMN appearances INTEGER")
             if "persistence" not in signal_columns:
                 db.execute("ALTER TABLE signals ADD COLUMN persistence TEXT")
+            strict_validation_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(strict_validations)").fetchall()
+            }
+            for column in ("price_0935", "price_1030", "return_0530", "return_3160"):
+                if column not in strict_validation_columns:
+                    db.execute(f"ALTER TABLE strict_validations ADD COLUMN {column} REAL")
 
     def save_staged_scan(
         self,
@@ -665,7 +676,9 @@ class ValidationStore:
                        s.signal_date, v.validation_date, v.price_1000
                 FROM strict_final_signals s
                 LEFT JOIN strict_validations v ON v.strict_signal_id=s.id
-                WHERE s.signal_date < ? AND v.id IS NULL
+                WHERE s.signal_date < ? AND (
+                    v.id IS NULL OR v.price_0935 IS NULL OR v.price_1030 IS NULL
+                )
                 ORDER BY s.signal_date, s.composite_score DESC
                 """,
                 (before_date,),
@@ -675,6 +688,7 @@ class ValidationStore:
         columns = [
             "validation_date", "open_price", "price_1000", "high_1000", "low_1000",
             "open_return", "return_1000", "max_return_1000", "max_drawdown_1000",
+            "price_0935", "price_1030", "return_0530", "return_3160",
             "calculated_at",
         ]
         with self.connect() as db:
@@ -693,6 +707,7 @@ class ValidationStore:
                    s.composite_score, s.score_1430, s.score_1445, s.score_1452,
                    s.persistence, v.validation_date, v.open_return, v.return_1000,
                    v.max_return_1000, v.max_drawdown_1000, v.calculated_at
+                   , v.price_0935, v.price_1030, v.return_0530, v.return_3160
             FROM strict_final_signals s
             LEFT JOIN strict_validations v ON v.strict_signal_id=s.id
             ORDER BY s.signal_date DESC, s.composite_score DESC

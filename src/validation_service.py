@@ -148,7 +148,7 @@ def validate_strict_three_stage_pending(
             if validation_date == now.date().isoformat() and now.time() < time(10, 0):
                 summary["skipped"] += 1
                 continue
-            result = _calculate_half_hour(
+            result = _calculate_strict_windows(
                 stock_days[validation_date], float(signal["entry_price"]),
             )
             if result is None:
@@ -261,6 +261,34 @@ def _calculate_half_hour(rows: pd.DataFrame, entry_price: float) -> dict[str, fl
         "max_return_1000": pct(high),
         "max_drawdown_1000": pct(low),
     }
+
+
+def _calculate_strict_windows(rows: pd.DataFrame, entry_price: float) -> dict[str, float] | None:
+    """严格三次稳定的开盘、5–30分钟与31–60分钟三个固定时段。"""
+    half_hour = _calculate_half_hour(rows, entry_price)
+    if half_hour is None:
+        return None
+    first_5 = rows[rows["timestamp"].dt.time <= time(9, 35)].copy()
+    first_hour = rows[rows["timestamp"].dt.time <= time(10, 30)].copy()
+    if (
+        first_5.empty
+        or first_hour.empty
+        or first_5["timestamp"].iloc[-1].time() < time(9, 35)
+        or first_hour["timestamp"].iloc[-1].time() < time(10, 29)
+    ):
+        return None
+    price_0935 = float(first_5.iloc[-1]["close"])
+    price_1030 = float(first_hour.iloc[-1]["close"])
+    price_1000 = float(half_hour["price_1000"])
+    half_hour.update(
+        {
+            "price_0935": price_0935,
+            "price_1030": price_1030,
+            "return_0530": (price_1000 / price_0935 - 1) * 100,
+            "return_3160": (price_1030 / price_1000 - 1) * 100,
+        }
+    )
+    return half_hour
 
 
 def _calculate_windows(

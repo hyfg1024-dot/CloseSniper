@@ -11,7 +11,7 @@ from src.validation_service import (
     validate_strict_three_stage_pending,
 )
 from src.validation_store import ValidationStore
-from src.validation_ui import _format_return, _return_color
+from src.validation_ui import _format_return, _payoff_ratio, _return_color
 
 
 def minute_frame(day: str, start: float, periods: int = 61) -> pd.DataFrame:
@@ -57,6 +57,10 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(_format_return(-0.8), "-0.80%")
         self.assertEqual(_format_return(0), "0.00%")
         self.assertEqual(_format_return(float("nan")), "—")
+
+    def test_payoff_ratio_uses_average_profit_over_average_loss(self):
+        self.assertAlmostEqual(_payoff_ratio(pd.Series([2.0, 4.0, -1.0, -3.0])), 1.5)
+        self.assertIsNone(_payoff_ratio(pd.Series([1.0, 2.0])))
 
     def test_first_scan_is_frozen(self):
         candidate = {
@@ -217,6 +221,8 @@ class ValidationTests(unittest.TestCase):
         self.assertAlmostEqual(result["open_return"], 0.0)
         self.assertAlmostEqual(result["return_1000"], 6.0)
         self.assertGreater(result["max_return_1000"], result["return_1000"])
+        self.assertAlmostEqual(result["return_0530"], (10.6 / 10.1 - 1) * 100)
+        self.assertAlmostEqual(result["return_3160"], (11.2 / 10.6 - 1) * 100)
 
     def test_validation_separates_open_0945_and_1030(self):
         self.store.freeze_scan(
