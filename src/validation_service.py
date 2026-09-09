@@ -127,6 +127,66 @@ def validate_pending(
     return summary
 
 
+def validate_strict_three_stage_pending(
+    store: ValidationStore,
+    source: AkshareSource | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """校验严格标准且14:30、14:45、14:52均入选的股票至10:00。"""
+    now = now or datetime.now()
+    source = source or AkshareSource()
+    pending = store.pending_strict_final_signals(now.date().isoformat())
+    summary: dict[str, Any] = {"pending": len(pending), "completed": 0, "skipped": 0, "errors": {}}
+    for signal in pending:
+        code = str(signal["code"])
+        try:
+            stock_days = _split_days(_minutes_for_signal(source, code, str(signal["signal_date"]), now))
+            validation_date = _first_day_after(stock_days, str(signal["signal_date"]))
+            if validation_date is None:
+                summary["skipped"] += 1
+                continue
+            if validation_date == now.date().isoformat() and now.time() < time(10, 0):
+                summary["skipped"] += 1
+                continue
+            result = _calculate_half_hour(
+                stock_days[validation_date], float(signal["entry_price"]),
+            )
+            if result is None:
+                summary["skipped"] += 1
+                continue
+            store.save_strict_validation(
+                int(signal["strict_signal_id"]),
+                {
+                    "validation_date": validation_date,
+                    **result,
+                    "calculated_at": now.isoformat(timespec="seconds"),
+                },
+            )
+            summary["completed"] += 1
+        except Exception as exc:
+            summary["errors"][code] = str(exc)
+    return summary
+
+
+def _minutes_for_signal(
+    source: AkshareSource,
+    code: str,
+    signal_date: str,
+    now: datetime,
+) -> pd.DataFrame:
+    """优先精确取历史日期；测试替身与当日行情保留原接口。"""
+    if signal_date < now.date().isoformat() and hasattr(source, "minute_between"):
+        start = pd.Timestamp(signal_date) + pd.Timedelta(days=1)
+        # 留出周末和节假日，之后由 _first_day_after 选取下一实际交易日。
+        end = start + pd.Timedelta(days=7)
+        try:
+            return source.minute_between(code, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+        except Exception:
+            # 东财历史区间偶尔主动断开；新浪近20日分钟线可作为补算备用。
+            return source.minute_recent(code)
+    return source.minute_recent(code)
+
+
 def _standardize_minutes(raw: pd.DataFrame | None) -> pd.DataFrame:
     if raw is None or raw.empty:
         return pd.DataFrame()
@@ -176,6 +236,30 @@ def _calculate_open_snapshot(
         "captured_price": captured_price,
         "open_return": (open_price / entry_price - 1) * 100,
         "captured_return": (captured_price / entry_price - 1) * 100,
+    }
+
+
+def _calculate_half_hour(rows: pd.DataFrame, entry_price: float) -> dict[str, float] | None:
+    """固定用9:30开盘至10:00收盘，衡量开盘半小时盈亏。"""
+    if rows.empty or entry_price <= 0:
+        return None
+    window = rows[rows["timestamp"].dt.time <= time(10, 0)].copy()
+    if window.empty or window["timestamp"].iloc[-1].time() < time(9, 59):
+        return None
+    open_price = float(window.iloc[0]["open"])
+    price_1000 = float(window.iloc[-1]["close"])
+    high = float(window["high"].max())
+    low = float(window["low"].min())
+    pct = lambda price: (price / entry_price - 1) * 100
+    return {
+        "open_price": open_price,
+        "price_1000": price_1000,
+        "high_1000": high,
+        "low_1000": low,
+        "open_return": pct(open_price),
+        "return_1000": pct(price_1000),
+        "max_return_1000": pct(high),
+        "max_drawdown_1000": pct(low),
     }
 
 

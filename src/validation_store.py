@@ -182,6 +182,33 @@ class ValidationStore:
                     persistence TEXT,
                     UNIQUE(review_scan_id, mode, code)
                 );
+                CREATE TABLE IF NOT EXISTS strict_final_signals (
+                    id INTEGER PRIMARY KEY,
+                    signal_date TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    composite_score REAL NOT NULL,
+                    score_1430 REAL NOT NULL,
+                    score_1445 REAL NOT NULL,
+                    score_1452 REAL NOT NULL,
+                    persistence TEXT NOT NULL DEFAULT '三次稳定',
+                    UNIQUE(signal_date, code)
+                );
+                CREATE TABLE IF NOT EXISTS strict_validations (
+                    id INTEGER PRIMARY KEY,
+                    strict_signal_id INTEGER NOT NULL UNIQUE REFERENCES strict_final_signals(id) ON DELETE CASCADE,
+                    validation_date TEXT NOT NULL,
+                    open_price REAL NOT NULL,
+                    price_1000 REAL NOT NULL,
+                    high_1000 REAL NOT NULL,
+                    low_1000 REAL NOT NULL,
+                    open_return REAL NOT NULL,
+                    return_1000 REAL NOT NULL,
+                    max_return_1000 REAL NOT NULL,
+                    max_drawdown_1000 REAL NOT NULL,
+                    calculated_at TEXT NOT NULL
+                );
                 """
             )
             existing = {
@@ -576,6 +603,102 @@ class ValidationStore:
                     for item in candidates
                 ],
             )
+
+    def rebuild_strict_final_signals(self, trade_date: str) -> int:
+        """仅把严格标准三个时点均入选的股票写入独立校验队列。"""
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT a.code, a.name, a.score AS score_1430,
+                       b.score AS score_1445, c.score AS score_1452,
+                       c.entry_price
+                FROM strict_scans sa
+                JOIN strict_candidates a ON a.strict_scan_id=sa.id
+                JOIN strict_scans sb ON sb.trade_date=sa.trade_date AND sb.slot='1445'
+                JOIN strict_candidates b ON b.strict_scan_id=sb.id AND b.code=a.code
+                JOIN strict_scans sc ON sc.trade_date=sa.trade_date AND sc.slot='1452'
+                JOIN strict_candidates c ON c.strict_scan_id=sc.id AND c.code=a.code
+                WHERE sa.trade_date=? AND sa.slot='1430'
+                """,
+                (trade_date,),
+            ).fetchall()
+            for row in rows:
+                composite = round(
+                    0.20 * float(row["score_1430"])
+                    + 0.30 * float(row["score_1445"])
+                    + 0.50 * float(row["score_1452"]),
+                    1,
+                )
+                db.execute(
+                    """
+                    INSERT INTO strict_final_signals
+                    (signal_date, code, name, entry_price, composite_score,
+                     score_1430, score_1445, score_1452, persistence)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, '三次稳定')
+                    ON CONFLICT(signal_date, code) DO UPDATE SET
+                        name=excluded.name, entry_price=excluded.entry_price,
+                        composite_score=excluded.composite_score,
+                        score_1430=excluded.score_1430, score_1445=excluded.score_1445,
+                        score_1452=excluded.score_1452
+                    """,
+                    (
+                        trade_date, str(row["code"]), str(row["name"]),
+                        float(row["entry_price"]), composite,
+                        float(row["score_1430"]), float(row["score_1445"]),
+                        float(row["score_1452"]),
+                    ),
+                )
+        return len(rows)
+
+    def rebuild_all_strict_final_signals(self) -> int:
+        with self.connect() as db:
+            dates = [str(row["trade_date"]) for row in db.execute(
+                "SELECT DISTINCT trade_date FROM strict_scans ORDER BY trade_date"
+            ).fetchall()]
+        return sum(self.rebuild_strict_final_signals(date) for date in dates)
+
+    def pending_strict_final_signals(self, before_date: str) -> list[sqlite3.Row]:
+        with self.connect() as db:
+            return db.execute(
+                """
+                SELECT s.id AS strict_signal_id, s.code, s.name, s.entry_price,
+                       s.signal_date, v.validation_date, v.price_1000
+                FROM strict_final_signals s
+                LEFT JOIN strict_validations v ON v.strict_signal_id=s.id
+                WHERE s.signal_date < ? AND v.id IS NULL
+                ORDER BY s.signal_date, s.composite_score DESC
+                """,
+                (before_date,),
+            ).fetchall()
+
+    def save_strict_validation(self, strict_signal_id: int, values: dict[str, Any]) -> None:
+        columns = [
+            "validation_date", "open_price", "price_1000", "high_1000", "low_1000",
+            "open_return", "return_1000", "max_return_1000", "max_drawdown_1000",
+            "calculated_at",
+        ]
+        with self.connect() as db:
+            db.execute(
+                f"""
+                INSERT OR REPLACE INTO strict_validations
+                (strict_signal_id, {", ".join(columns)})
+                VALUES (?, {", ".join("?" for _ in columns)})
+                """,
+                [strict_signal_id, *[values.get(column) for column in columns]],
+            )
+
+    def strict_validation_frame(self) -> pd.DataFrame:
+        query = """
+            SELECT s.signal_date, s.code, s.name, s.entry_price,
+                   s.composite_score, s.score_1430, s.score_1445, s.score_1452,
+                   s.persistence, v.validation_date, v.open_return, v.return_1000,
+                   v.max_return_1000, v.max_drawdown_1000, v.calculated_at
+            FROM strict_final_signals s
+            LEFT JOIN strict_validations v ON v.strict_signal_id=s.id
+            ORDER BY s.signal_date DESC, s.composite_score DESC
+        """
+        with self.connect() as db:
+            return pd.read_sql_query(query, db)
 
     def latest_strict_frame(self, trade_date: str) -> pd.DataFrame:
         query = """

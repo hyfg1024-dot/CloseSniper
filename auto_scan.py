@@ -297,6 +297,7 @@ def run_full_review(
         slot="1452", scanned_at=completed_at, provider=result.provider,
         candidates=strict,
     )
+    strict_three_stage = store.rebuild_strict_final_signals(trade_date)
     telegram = send_once(
         store=store, trade_date=trade_date, channel="telegram-review",
         message=format_review_message(
@@ -308,7 +309,8 @@ def run_full_review(
         sent_at=completed_at,
     )
     return {
-        "status": "ok", "strict": len(strict), "improved": len(improved),
+        "status": "ok", "strict": len(strict), "strict_three_stage": strict_three_stage,
+        "improved": len(improved),
         "attempts": attempts, "telegram": telegram,
         "completed_at": completed_at.isoformat(timespec="seconds"),
     }

@@ -306,6 +306,25 @@ class AkshareSource:
                 adjust="",
             )
 
+    def minute_for_date(self, code: str, trade_date: str) -> pd.DataFrame:
+        """读取指定交易日的一分钟线，供历史校验补算使用。"""
+        return self.ak.stock_zh_a_hist_min_em(
+            symbol=str(code).zfill(6),
+            start_date=f"{trade_date} 09:30:00",
+            end_date=f"{trade_date} 15:00:00",
+            period="1",
+            adjust="",
+        )
+
+    def minute_between(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        return self.ak.stock_zh_a_hist_min_em(
+            symbol=str(code).zfill(6),
+            start_date=f"{start_date} 09:30:00",
+            end_date=f"{end_date} 15:00:00",
+            period="1",
+            adjust="",
+        )
+
     def index_minute(self) -> pd.DataFrame:
         frame = self.index_minute_recent()
         day = datetime.now().strftime("%Y-%m-%d")

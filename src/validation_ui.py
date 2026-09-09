@@ -7,7 +7,11 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.data_source import AkshareSource
-from src.validation_service import capture_open_pending, validate_pending
+from src.validation_service import (
+    capture_open_pending,
+    validate_pending,
+    validate_strict_three_stage_pending,
+)
 from src.validation_store import ValidationStore
 
 
@@ -25,6 +29,9 @@ def render_validation_page(store: ValidationStore) -> None:
     now = datetime.now()
     pending_rows = store.pending_signals(now.date().isoformat())
     frame = store.validation_frame()
+    store.rebuild_all_strict_final_signals()
+    strict_frame = store.strict_validation_frame()
+    strict_pending = store.pending_strict_final_signals(now.date().isoformat())
     should_auto = any(
         (
             row["price_0945"] is None
@@ -38,6 +45,7 @@ def render_validation_page(store: ValidationStore) -> None:
         for row in pending_rows
     )
     early_window = time(9, 30) <= now.time() < time(9, 51)
+    strict_should_auto = bool(strict_pending) and now.time() >= time(10, 0)
     if not early_window:
         early_label = "早盘获取窗口"
     elif now.time() < time(9, 45):
@@ -56,7 +64,7 @@ def render_validation_page(store: ValidationStore) -> None:
     if not early_window:
         st.caption("早盘按钮仅在交易日 9:30–9:50 开放；错过后可使用“补算缺失数据”。")
 
-    if early_update or backfill or should_auto:
+    if early_update or backfill or should_auto or strict_should_auto:
         with st.status("正在读取次日 9:30–10:30 行情…", expanded=True) as status:
             try:
                 source = AkshareSource()
@@ -74,9 +82,17 @@ def render_validation_page(store: ValidationStore) -> None:
                         f"补齐 10:30 数据 {summary['completed_1030']} 只，"
                         f"等待数据 {summary['skipped']} 只，异常 {len(summary['errors'])} 只"
                     )
+                if backfill or strict_should_auto:
+                    strict_summary = validate_strict_three_stage_pending(store, source, now)
+                    status.write(
+                        f"严格三次稳定 · 补齐开盘半小时 {strict_summary['completed']} 只，"
+                        f"等待数据 {strict_summary['skipped']} 只，异常 {len(strict_summary['errors'])} 只"
+                    )
                 status.update(label="校验更新完成", state="complete", expanded=False)
                 frame = store.validation_frame()
                 pending_rows = store.pending_signals(now.date().isoformat())
+                strict_frame = store.strict_validation_frame()
+                strict_pending = store.pending_strict_final_signals(now.date().isoformat())
             except Exception as exc:
                 status.update(label="校验暂未完成", state="error")
                 st.error(f"校验行情读取失败：{exc}")
@@ -92,8 +108,14 @@ def render_validation_page(store: ValidationStore) -> None:
     c4.metric("已到 10:30", int(completed_1030))
     st.caption(f"累计冻结信号：{len(frame)} 只")
 
-    if frame.empty:
+    _render_strict_three_stage_half_hour(strict_frame, strict_pending)
+
+    if frame.empty and strict_frame.empty:
         st.info("尚无冻结候选。交易日完成14:30、14:45、14:52三阶段扫描后，系统会冻结综合最终名单。")
+        _render_definition()
+        return
+
+    if frame.empty:
         _render_definition()
         return
 
@@ -146,6 +168,50 @@ def render_validation_page(store: ValidationStore) -> None:
     _render_definition()
 
 
+def _render_strict_three_stage_half_hour(
+    frame: pd.DataFrame,
+    pending_rows: list[object],
+    *,
+    heading: str = "严格标准 · 三次稳定 · 开盘半小时",
+) -> None:
+    """严格口径单独统计，避免与改进流程的最终名单混算。"""
+    st.markdown(f"### {heading}")
+    st.caption("只统计 14:30、14:45、14:52 三次均入选的严格标准股票；开盘半小时固定为次日 9:30 开盘至 10:00 收盘。")
+    completed = frame.dropna(subset=["return_1000"]).copy() if not frame.empty else pd.DataFrame()
+    if completed.empty:
+        waiting = len(pending_rows)
+        st.info(f"已冻结三次稳定信号 {len(frame)} 只；待补齐开盘半小时数据 {waiting} 只。")
+        return
+    win_rate = float((completed["return_1000"] > 0).mean() * 100)
+    mean_return = float(completed["return_1000"].mean())
+    median_return = float(completed["return_1000"].median())
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("已完成样本", f"{len(completed)} 只")
+    m2.metric("开盘半小时盈利概率", f"{win_rate:.1f}%")
+    m3.metric("平均收益（至10:00）", _format_return(mean_return))
+    m4.metric("收益中位数", _format_return(median_return))
+    display = completed.rename(columns={
+        "signal_date": "信号日", "validation_date": "校验日", "code": "代码", "name": "名称",
+        "entry_price": "信号价", "composite_score": "严格综合评分",
+        "score_1430": "14:30评分", "score_1445": "14:45评分", "score_1452": "14:52评分",
+        "open_return": "9:30涨跌", "return_1000": "10:00涨跌",
+        "max_return_1000": "半小时最高涨幅", "max_drawdown_1000": "半小时最低涨跌",
+    })
+    columns = [
+        "信号日", "校验日", "代码", "名称", "严格综合评分",
+        "14:30评分", "14:45评分", "14:52评分", "信号价",
+        "9:30涨跌", "10:00涨跌", "半小时最高涨幅", "半小时最低涨跌",
+    ]
+    returns = ["9:30涨跌", "10:00涨跌", "半小时最高涨幅", "半小时最低涨跌"]
+    st.dataframe(
+        display[columns].style.map(_return_color, subset=returns).format(
+            {column: _format_return for column in returns}, na_rep="—"
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+
+
 def render_history_page(store: ValidationStore) -> None:
     st.markdown(
         """
@@ -159,6 +225,12 @@ def render_history_page(store: ValidationStore) -> None:
     )
     frame = store.validation_frame().dropna(subset=["price_0945"]).copy()
     scans = store.scan_frame()
+    strict_frame = store.strict_validation_frame()
+    _render_strict_three_stage_half_hour(
+        strict_frame,
+        store.pending_strict_final_signals(datetime.now().date().isoformat()),
+        heading="严格标准 · 三次稳定 · 开盘半小时表现",
+    )
     if frame.empty:
         st.info("累计完成至少一个次日校验后，这里会展示胜率、收益分布和滚动表现。")
         if not scans.empty:
@@ -251,6 +323,7 @@ def _render_definition() -> None:
 - **10:30收益**：截至 10:30 分钟线收盘价相对信号价的收益，用于观察早盘强势能否延续。
 - **15分钟最高**：9:30–9:45 区间最高价相对信号价的收益。
 - **60分钟最高 / 回撤**：9:30–10:30 区间最高价、最低价相对信号价的收益。
+- **严格三次稳定·开盘半小时**：仅纳入严格标准在14:30、14:45、14:52三次均入选的股票；以次日10:00收盘价相对信号价计算盈亏概率，不与改进流程混算。
 - 9:45前点击只保存开盘快照；9:45后点击会完成固定口径校验并进入“历史表现”。
 - 停牌或免费行情尚未完整到达时保持“待校验”，之后自动补算。
 """

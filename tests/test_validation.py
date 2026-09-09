@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.validation_service import capture_open_pending, validate_pending
+from src.validation_service import (
+    capture_open_pending,
+    validate_pending,
+    validate_strict_three_stage_pending,
+)
 from src.validation_store import ValidationStore
 from src.validation_ui import _format_return, _return_color
 
@@ -191,6 +195,28 @@ class ValidationTests(unittest.TestCase):
         all_slots = self.store.strict_frame("2026-08-03")
         self.assertEqual(all_slots["slot"].tolist(), ["1430", "1452"])
         self.assertEqual(all_slots["code"].tolist(), ["600001", "600002"])
+
+    def test_strict_three_stage_signal_is_validated_separately_to_1000(self):
+        candidate = {"code": "600001", "name": "严格测试", "price": 10.0, "score": 80.0}
+        for slot, score in (("1430", 80.0), ("1445", 85.0), ("1452", 90.0)):
+            row = {**candidate, "score": score}
+            self.store.save_strict_scan(
+                slot=slot, scanned_at=datetime(2026, 8, 2, 14, int(slot[2:])),
+                provider="测试", candidates=[row],
+            )
+        self.assertEqual(self.store.rebuild_strict_final_signals("2026-08-02"), 1)
+        strict = self.store.strict_validation_frame()
+        self.assertEqual(strict.iloc[0]["persistence"], "三次稳定")
+        self.assertAlmostEqual(strict.iloc[0]["composite_score"], 86.5)
+
+        summary = validate_strict_three_stage_pending(
+            self.store, FakeSource(), now=datetime(2026, 8, 3, 10, 31),
+        )
+        self.assertEqual(summary["completed"], 1)
+        result = self.store.strict_validation_frame().iloc[0]
+        self.assertAlmostEqual(result["open_return"], 0.0)
+        self.assertAlmostEqual(result["return_1000"], 6.0)
+        self.assertGreater(result["max_return_1000"], result["return_1000"])
 
     def test_validation_separates_open_0945_and_1030(self):
         self.store.freeze_scan(
