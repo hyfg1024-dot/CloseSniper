@@ -226,6 +226,15 @@ class ValidationStore:
                     return_3160 REAL,
                     calculated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS strict_exit_observations (
+                    id INTEGER PRIMARY KEY,
+                    strict_signal_id INTEGER NOT NULL REFERENCES strict_final_signals(id) ON DELETE CASCADE,
+                    observation_slot TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    observed_price REAL NOT NULL,
+                    return_pct REAL NOT NULL,
+                    UNIQUE(strict_signal_id, observation_slot)
+                );
                 """
             )
             existing = {
@@ -727,6 +736,58 @@ class ValidationStore:
         """
         with self.connect() as db:
             return pd.read_sql_query(query, db)
+
+    def pending_live_strict_signals(self, trade_date: str) -> list[sqlite3.Row]:
+        """Signals from the most recent completed scan day only.
+
+        A 10:00 observation is a live next-session checkpoint, not a historical
+        backfill.  Restricting it to the latest scan day prevents an old missing
+        validation from being accidentally treated as today's trade.
+        """
+        with self.connect() as db:
+            return db.execute(
+                """
+                SELECT s.id AS strict_signal_id, s.code, s.name, s.entry_price, s.signal_date
+                FROM strict_final_signals s
+                LEFT JOIN strict_validations v ON v.strict_signal_id=s.id
+                WHERE s.signal_date=(
+                    SELECT MAX(trade_date) FROM strict_scans WHERE trade_date < ?
+                ) AND v.id IS NULL
+                ORDER BY s.composite_score DESC
+                """, (trade_date,),
+            ).fetchall()
+
+    def save_strict_exit_observation(self, strict_signal_id: int, slot: str, observed_at: datetime, price: float, return_pct: float) -> None:
+        with self.connect() as db:
+            db.execute(
+                """INSERT OR REPLACE INTO strict_exit_observations
+                (strict_signal_id, observation_slot, observed_at, observed_price, return_pct)
+                VALUES (?, ?, ?, ?, ?)""",
+                (strict_signal_id, slot, observed_at.isoformat(timespec="seconds"), price, return_pct),
+            )
+
+    def strict_exit_observation_frame(self, trade_date: str) -> pd.DataFrame:
+        with self.connect() as db:
+            return pd.read_sql_query(
+                """SELECT s.code, s.name, s.signal_date, o.observation_slot, o.observed_at, o.observed_price, o.return_pct
+                FROM strict_exit_observations o JOIN strict_final_signals s ON s.id=o.strict_signal_id
+                WHERE substr(o.observed_at, 1, 10)=? ORDER BY o.return_pct DESC""",
+                db, params=(trade_date,),
+            )
+
+    def strict_exit_checkpoint_stats(self) -> dict[str, float | int] | None:
+        """Return the current 10:00 evidence used in the observation notice."""
+        frame = self.strict_validation_frame()
+        if frame.empty:
+            return None
+        values = frame["return_1000"].dropna()
+        if values.empty:
+            return None
+        return {
+            "sample_size": int(len(values)),
+            "win_rate": float((values > 0).mean() * 100),
+            "average_return": float(values.mean()),
+        }
 
     def latest_strict_frame(self, trade_date: str) -> pd.DataFrame:
         query = """

@@ -140,9 +140,18 @@ def validate_strict_three_stage_pending(
     for signal in pending:
         code = str(signal["code"])
         try:
-            stock_days = _split_days(_minutes_for_signal(source, code, str(signal["signal_date"]), now))
-            validation_date = _first_day_after(stock_days, str(signal["signal_date"]))
+            signal_date = str(signal["signal_date"])
+            existing_date = str(signal["validation_date"] or "")
+            stock_days = _split_days(_minutes_for_signal(
+                source, code, signal_date, now, validation_date=existing_date or None,
+            ))
+            validation_date = existing_date or _first_day_after(stock_days, signal_date)
             if validation_date is None:
+                summary["skipped"] += 1
+                continue
+            if validation_date not in stock_days:
+                # Historical fallback may contain only much later sessions. Never overwrite a
+                # prior validation with a date that is unrelated to this signal.
                 summary["skipped"] += 1
                 continue
             if validation_date == now.date().isoformat() and now.time() < time(10, 0):
@@ -168,29 +177,74 @@ def validate_strict_three_stage_pending(
     return summary
 
 
+def capture_strict_exit_observation(
+    store: ValidationStore,
+    source: AkshareSource | None = None,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """At 10:01, capture the completed 10:00 checkpoint for live strict signals only."""
+    now = now or datetime.now()
+    if now.time() < time(10, 0):
+        return []
+    source = source or AkshareSource()
+    rows: list[dict[str, Any]] = []
+    for signal in store.pending_live_strict_signals(now.date().isoformat()):
+        try:
+            minutes = _split_days(source.minute_recent(str(signal["code"])))
+            current = minutes.get(now.date().isoformat())
+            if current is None:
+                continue
+            window = current[current["timestamp"].dt.time <= time(10, 0)].copy()
+            if window.empty or window["timestamp"].iloc[-1].time() < time(9, 59):
+                continue
+            price = float(window.iloc[-1]["close"])
+            value = (price / float(signal["entry_price"]) - 1) * 100
+            store.save_strict_exit_observation(int(signal["strict_signal_id"]), "1000", now, price, value)
+            rows.append({"code": str(signal["code"]), "name": str(signal["name"]), "return_pct": value})
+        except Exception:
+            continue
+    return rows
+
+
 def _minutes_for_signal(
     source: AkshareSource,
     code: str,
     signal_date: str,
     now: datetime,
+    *,
+    validation_date: str | None = None,
 ) -> pd.DataFrame:
-    """优先精确取历史日期；测试替身与当日行情保留原接口。"""
+    """Fetch only the next-session window; a recent-data fallback must never drift forward."""
+    raw: pd.DataFrame
     if signal_date < now.date().isoformat() and hasattr(source, "minute_between"):
-        start = pd.Timestamp(signal_date) + pd.Timedelta(days=1)
-        # 留出周末和节假日，之后由 _first_day_after 选取下一实际交易日。
-        end = start + pd.Timedelta(days=7)
+        start = pd.Timestamp(validation_date) if validation_date else pd.Timestamp(signal_date) + pd.Timedelta(days=1)
+        # 留出周末和节假日；已有校验日时则只允许该日期，防止补算覆盖历史结果。
+        end = pd.Timestamp(validation_date) if validation_date else pd.Timestamp(signal_date) + pd.Timedelta(days=7)
         try:
-            return source.minute_between(code, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+            raw = source.minute_between(code, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
         except Exception:
-            # 东财历史区间偶尔主动断开；新浪近20日分钟线可作为补算备用。
-            return source.minute_recent(code)
-    return source.minute_recent(code)
+            # The recent endpoint is an availability fallback only. It is bounded below so
+            # an unrelated later day cannot become a synthetic “next session”.
+            raw = source.minute_recent(code)
+    else:
+        raw = source.minute_recent(code)
+    standardized = _standardize_minutes(raw)
+    if standardized.empty:
+        return raw
+    start = pd.Timestamp(validation_date) if validation_date else pd.Timestamp(signal_date) + pd.Timedelta(days=1)
+    end = pd.Timestamp(validation_date) if validation_date else pd.Timestamp(signal_date) + pd.Timedelta(days=7)
+    return standardized.loc[
+        (standardized["timestamp"].dt.normalize() >= start.normalize())
+        & (standardized["timestamp"].dt.normalize() <= end.normalize())
+    ].copy()
 
 
 def _standardize_minutes(raw: pd.DataFrame | None) -> pd.DataFrame:
     if raw is None or raw.empty:
         return pd.DataFrame()
-    if {"day", "open", "high", "low", "close"}.issubset(raw.columns):
+    if {"timestamp", "open", "high", "low", "close"}.issubset(raw.columns):
+        df = raw[["timestamp", "open", "high", "low", "close"]].copy()
+    elif {"day", "open", "high", "low", "close"}.issubset(raw.columns):
         df = raw[["day", "open", "high", "low", "close"]].copy()
         df = df.rename(columns={"day": "timestamp"})
     elif {"时间", "开盘", "最高", "最低", "收盘"}.issubset(raw.columns):

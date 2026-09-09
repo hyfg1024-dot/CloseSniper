@@ -277,6 +277,31 @@ def format_strict_watch_message(
     return "\n".join(lines)
 
 
+def format_strict_exit_observation_message(
+    trade_date: str,
+    rows: Iterable[dict[str, Any]],
+    stats: dict[str, float | int] | None = None,
+) -> str:
+    items = list(rows)
+    evidence = "历史口径：样本仍在累计中。"
+    if stats:
+        evidence = (
+            "历史口径：当前样本中10:00盈利概率"
+            f"{float(stats['win_rate']):.1f}%，平均收益{float(stats['average_return']):+.2f}%"
+            f"（样本{int(stats['sample_size'])}）。"
+        )
+    lines = [
+        f"⏱️ CloseSniper｜{trade_date} 严格三次稳定 · 10:00观察",
+        evidence,
+        "该提示是兑现/风控检查点，不是自动卖出指令。",
+        "",
+    ]
+    for item in items:
+        lines.append(f"{item['name']}（{item['code']}）｜至10:00 {float(item['return_pct']):+.2f}%")
+    lines.append("\n仅供策略研究，不构成投资建议。")
+    return "\n".join(lines)
+
+
 def format_review_message(
     *,
     trade_date: str,

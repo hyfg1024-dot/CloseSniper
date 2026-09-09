@@ -12,6 +12,7 @@ from src.telegram_service import (
     format_fast_decision_message,
     format_review_message,
     format_scan_issue_message,
+    format_strict_exit_observation_message,
     format_strict_watch_message,
     load_settings,
     save_settings,
@@ -102,6 +103,16 @@ class TelegramTests(unittest.TestCase):
         )
         self.assertIn("AI观察：继续观察", message)
         self.assertIn("14:52确认：不跌破均价线", message)
+
+    def test_strict_exit_observation_uses_live_history_stats(self) -> None:
+        message = format_strict_exit_observation_message(
+            "2026-09-09",
+            [{"code": "600001", "name": "观察股", "return_pct": 1.25}],
+            {"sample_size": 7, "win_rate": 57.142, "average_return": 0.333},
+        )
+        self.assertIn("盈利概率57.1%", message)
+        self.assertIn("平均收益+0.33%（样本7）", message)
+        self.assertIn("观察股（600001）｜至10:00 +1.25%", message)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.validation_service import (
+    capture_strict_exit_observation,
     capture_open_pending,
     validate_pending,
     validate_strict_three_stage_pending,
@@ -36,6 +37,12 @@ class FakeSource:
 
     def index_minute_recent(self) -> pd.DataFrame:
         return minute_frame("2026-08-03", 3800.0)
+
+
+class RecentOnlySource:
+    """Simulates a fallback endpoint that no longer retains the requested next day."""
+    def minute_recent(self, code: str) -> pd.DataFrame:
+        return minute_frame("2026-09-03", 10.0)
 
 
 class ValidationTests(unittest.TestCase):
@@ -223,6 +230,49 @@ class ValidationTests(unittest.TestCase):
         self.assertGreater(result["max_return_1000"], result["return_1000"])
         self.assertAlmostEqual(result["return_0530"], (10.6 / 10.1 - 1) * 100)
         self.assertAlmostEqual(result["return_3160"], (11.2 / 10.6 - 1) * 100)
+
+    def test_strict_backfill_never_replaces_an_old_validation_with_recent_fallback(self):
+        candidate = {"code": "600001", "name": "严格测试", "price": 10.0, "score": 80.0}
+        for slot, score in (("1430", 80.0), ("1445", 85.0), ("1452", 90.0)):
+            self.store.save_strict_scan(
+                slot=slot, scanned_at=datetime(2026, 8, 24, 14, int(slot[2:])),
+                provider="测试", candidates=[{**candidate, "score": score}],
+            )
+        self.store.rebuild_strict_final_signals("2026-08-24")
+        strict_id = self.store.pending_strict_final_signals("2026-09-09")[0]["strict_signal_id"]
+        self.store.save_strict_validation(int(strict_id), {
+            "validation_date": "2026-08-25", "open_price": 10.1, "price_1000": 10.2,
+            "high_1000": 10.3, "low_1000": 10.0, "open_return": 1.0, "return_1000": 2.0,
+            "max_return_1000": 3.0, "max_drawdown_1000": 0.0,
+            "price_0935": None, "price_1030": None, "return_0530": None, "return_3160": None,
+            "calculated_at": "2026-08-25T10:30:00",
+        })
+
+        summary = validate_strict_three_stage_pending(
+            self.store, RecentOnlySource(), now=datetime(2026, 9, 9, 10, 30),
+        )
+        row = self.store.strict_validation_frame().iloc[0]
+        self.assertEqual(summary["completed"], 0)
+        self.assertEqual(row["validation_date"], "2026-08-25")
+        self.assertAlmostEqual(row["return_1000"], 2.0)
+
+    def test_1000_observation_only_captures_latest_live_strict_signal(self):
+        candidate = {"code": "600001", "name": "严格测试", "price": 10.0, "score": 80.0}
+        for slot, score in (("1430", 80.0), ("1445", 85.0), ("1452", 90.0)):
+            self.store.save_strict_scan(
+                slot=slot, scanned_at=datetime(2026, 8, 2, 14, int(slot[2:])),
+                provider="测试", candidates=[{**candidate, "score": score}],
+            )
+        self.store.rebuild_strict_final_signals("2026-08-02")
+
+        rows = capture_strict_exit_observation(
+            self.store, FakeSource(), now=datetime(2026, 8, 3, 10, 1),
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["return_pct"], 6.0)
+        stored = self.store.strict_exit_observation_frame("2026-08-03")
+        self.assertEqual(stored.iloc[0]["observation_slot"], "1000")
+        self.assertAlmostEqual(stored.iloc[0]["return_pct"], 6.0)
 
     def test_validation_separates_open_0945_and_1030(self):
         self.store.freeze_scan(

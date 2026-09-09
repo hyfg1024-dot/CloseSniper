@@ -109,6 +109,7 @@ def render_validation_page(store: ValidationStore) -> None:
     st.caption(f"累计冻结信号：{len(frame)} 只")
 
     _render_strict_three_stage_half_hour(strict_frame, strict_pending)
+    _render_strict_exit_observation(store, strict_frame, now.date().isoformat())
 
     if frame.empty and strict_frame.empty:
         st.info("尚无冻结候选。交易日完成14:30、14:45、14:52三阶段扫描后，系统会冻结综合最终名单。")
@@ -231,6 +232,62 @@ def _render_strict_three_stage_half_hour(
     )
 
 
+def _render_strict_exit_observation(
+    store: ValidationStore,
+    frame: pd.DataFrame,
+    trade_date: str,
+    *,
+    heading: str = "严格三次稳定 · 10:00 兑现／风控观察",
+) -> None:
+    """Show the evidence behind the live 10:00 checkpoint without implying a sell order."""
+    st.markdown(f"### {heading}")
+    completed = frame.dropna(subset=["validation_date"]).copy() if not frame.empty else pd.DataFrame()
+    if completed.empty:
+        st.caption("暂无完整历史样本；该观察点会在样本累积后自动形成统计。")
+        return
+
+    checkpoints: list[tuple[str, pd.Series]] = [
+        ("09:30 首分钟", completed["open_return"]),
+        ("09:35", (completed["price_0935"] / completed["entry_price"] - 1) * 100),
+        ("10:00 · 观察点", completed["return_1000"]),
+        ("10:30", (completed["price_1030"] / completed["entry_price"] - 1) * 100),
+    ]
+    columns = st.columns(4)
+    for container, (label, values) in zip(columns, checkpoints):
+        values = values.dropna()
+        if values.empty:
+            container.metric(label, "—", delta="暂无完整样本", delta_color="off")
+            continue
+        win_rate = float((values > 0).mean() * 100)
+        average = float(values.mean())
+        container.metric(
+            label,
+            f"{win_rate:.1f}%",
+            delta=f"样本 {len(values)}｜平均 {average:+.2f}%",
+            delta_color="off",
+        )
+    st.caption(
+        "当前把 10:00 设为观察点：它在现有严格三次稳定样本中与首分钟同为最高盈利概率，"
+        "且平均收益更高。它用于兑现／风控检查，不构成自动卖出指令；样本较少时只做记录。"
+    )
+
+    observed = store.strict_exit_observation_frame(trade_date)
+    if observed.empty:
+        st.info("今日若有上一交易日的严格三次稳定信号，后台会在 10:01 记录至 10:00 的收益，并推送观察提示。")
+        return
+    display = observed.rename(columns={
+        "code": "代码", "name": "名称", "signal_date": "信号日", "observation_slot": "观察点",
+        "observed_at": "记录时间", "observed_price": "10:00价格", "return_pct": "至10:00收益",
+    })
+    st.dataframe(
+        display[["代码", "名称", "信号日", "观察点", "记录时间", "10:00价格", "至10:00收益"]]
+        .style.map(_return_color, subset=["至10:00收益"])
+        .format({"10:00价格": "{:.2f}", "至10:00收益": _format_return}),
+        hide_index=True,
+        width="stretch",
+    )
+
+
 def render_history_page(store: ValidationStore) -> None:
     st.markdown(
         """
@@ -249,6 +306,12 @@ def render_history_page(store: ValidationStore) -> None:
         strict_frame,
         store.pending_strict_final_signals(datetime.now().date().isoformat()),
         heading="严格标准 · 三次稳定 · 开盘半小时表现",
+    )
+    _render_strict_exit_observation(
+        store,
+        strict_frame,
+        datetime.now().date().isoformat(),
+        heading="严格标准 · 三次稳定 · 卖出时点观察",
     )
     if frame.empty:
         st.info("累计完成至少一个次日校验后，这里会展示胜率、收益分布和滚动表现。")
