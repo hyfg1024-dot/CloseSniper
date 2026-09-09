@@ -91,6 +91,19 @@ h1,h2,h3 { font-family:"Noto Serif SC","Songti SC",serif !important; letter-spac
 .badge.live { color:white;background:var(--moss);border-color:var(--moss); }
 .card { background:rgba(255,255,255,.5);border:1px solid var(--line);padding:18px;margin:8px 0;box-shadow:5px 5px 0 rgba(23,33,28,.08); }
 .candidate { border-left:5px solid var(--signal); }
+.decision-shell { margin:22px 0 12px; }
+.decision-kicker { color:var(--signal);font-size:12px;letter-spacing:.15em;font-weight:700; }
+.decision-title { font-size:34px;margin:5px 0 4px; }
+.decision-note { color:#596159;font-size:13px;line-height:1.7;margin:0 0 14px; }
+.decision-card { background:rgba(255,255,255,.58); border:1px solid var(--line); border-left:6px solid var(--moss); padding:17px 19px; min-height:150px; box-shadow:5px 5px 0 rgba(23,33,28,.07); }
+.decision-card.risk { border-left-color:var(--signal); }
+.decision-card h3 { margin:3px 0 8px; font-size:24px; }
+.decision-stock { border-top:1px solid rgba(23,33,28,.14); padding:10px 0 2px; margin-top:8px; }
+.decision-stock b { font-size:17px; }
+.signal-strip { display:inline-block; margin:4px 5px 0 0; padding:3px 7px; background:rgba(49,91,69,.10); color:var(--moss); font-size:11px; border:1px solid rgba(49,91,69,.18); }
+.signal-strip.warning { background:rgba(240,90,40,.10); color:#a73c1c; border-color:rgba(240,90,40,.2); }
+.page-section { margin-top:30px; padding-top:20px; border-top:1px solid var(--line); }
+.page-section h2 { font-size:30px; margin:0 0 4px; }
 .audit-head { border-left:6px solid var(--signal);padding:8px 0 8px 20px;margin:22px 0 26px; }
 .audit-head h2 { font-size:40px;margin:4px 0 8px; }
 .audit-head p { color:#596159;margin:0;max-width:760px; }
@@ -143,13 +156,13 @@ update();setInterval(update,1000);
 
 
 def make_config() -> StrategyConfig:
-    st.sidebar.markdown("## 策略刻度")
-    min_change, max_change = st.sidebar.slider("当日涨幅 (%)", 0.0, 10.0, (3.0, 5.0), 0.1)
-    min_turn, max_turn = st.sidebar.slider("换手率 (%)", 0.0, 20.0, (5.0, 10.0), 0.5)
-    min_cap, max_cap = st.sidebar.slider("流通市值 (亿元)", 10, 500, (50, 200), 10)
-    ratio = st.sidebar.number_input("最低量比", 0.1, 5.0, 1.0, 0.1)
-    max_candidates = st.sidebar.slider("深度分析数量", 5, 60, 30, 5)
-    st.sidebar.caption("参数只改变筛选，不构成投资建议。首次建议保留默认值。")
+    with st.sidebar.expander("筛选参数", expanded=False):
+        st.caption("默认参数已按当前策略保存；仅在需要研究时调整。")
+        min_change, max_change = st.slider("当日涨幅 (%)", 0.0, 10.0, (3.0, 5.0), 0.1)
+        min_turn, max_turn = st.slider("换手率 (%)", 0.0, 20.0, (5.0, 10.0), 0.5)
+        min_cap, max_cap = st.slider("流通市值 (亿元)", 10, 500, (50, 200), 10)
+        ratio = st.number_input("最低量比", 0.1, 5.0, 1.0, 0.1)
+        max_candidates = st.slider("深度分析数量", 5, 60, 30, 5)
     return StrategyConfig(
         min_change=min_change,
         max_change=max_change,
@@ -271,6 +284,85 @@ def _slot_frame(frame: pd.DataFrame, slot: str) -> pd.DataFrame:
     return frame[frame["slot"].astype(str) == slot].copy()
 
 
+def _three_stage_strict_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Strict candidates present at every scheduled timestamp, scored with the documented 20/30/50 weights."""
+    if frame.empty:
+        return pd.DataFrame()
+    slot_frames = {
+        slot: _slot_frame(frame, slot).dropna(subset=["code"])
+        for slot in ("1430", "1445", "1452")
+    }
+    if any(items.empty for items in slot_frames.values()):
+        return pd.DataFrame()
+    shared = set(slot_frames["1430"]["code"])
+    shared &= set(slot_frames["1445"]["code"])
+    shared &= set(slot_frames["1452"]["code"])
+    rows: list[dict[str, object]] = []
+    for code in shared:
+        records = {
+            slot: items.loc[items["code"] == code].iloc[0]
+            for slot, items in slot_frames.items()
+        }
+        rows.append({
+            "code": code,
+            "name": records["1452"]["name"],
+            "entry_price": records["1452"]["entry_price"],
+            "composite_score": round(
+                .2 * float(records["1430"]["score"])
+                + .3 * float(records["1445"]["score"])
+                + .5 * float(records["1452"]["score"]), 1,
+            ),
+        })
+    return pd.DataFrame(rows).sort_values("composite_score", ascending=False) if rows else pd.DataFrame()
+
+
+def render_today_decision(
+    *,
+    strict_frame: pd.DataFrame,
+    rational_final: pd.DataFrame,
+    scan_status_frame: pd.DataFrame,
+) -> None:
+    """The first screen answers only: whether there is a primary signal and why."""
+    strict_final = _three_stage_strict_frame(strict_frame)
+    completed = set(scan_status_frame["slot"].astype(str)) if not scan_status_frame.empty else set()
+    ready = {"1430", "1445", "1452"}.issubset(completed)
+    st.markdown(
+        """
+        <div class="decision-shell">
+          <div class="decision-kicker">TODAY · PRIMARY DECISION</div>
+          <h2 class="decision-title">今日最终观察名单</h2>
+          <p class="decision-note">主名单只采用严格标准在 14:30、14:45、14:52 三次均入选的股票。改进流程仅提供风险标签，不取代严格标准。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    left, right = st.columns([1.55, 1])
+    with left:
+        if not ready:
+            st.markdown('<div class="decision-card"><b>等待三次扫描完成</b><p class="muted">14:30、14:45、14:52 的快照齐全后，系统会在这里生成严格三次稳定名单。</p></div>', unsafe_allow_html=True)
+        elif strict_final.empty:
+            st.markdown('<div class="decision-card risk"><b>今日无严格三次稳定标的</b><p class="muted">严格标准不会为了给出名单而放宽；今天宜保持空仓观察。</p></div>', unsafe_allow_html=True)
+        else:
+            rows = []
+            for rank, (_, row) in enumerate(strict_final.iterrows(), 1):
+                rows.append(
+                    f'<div class="decision-stock"><b>NO.{rank:02d} · {row["name"]}</b> <span class="muted">{row["code"]}</span><br>'
+                    f'<span class="signal-strip">三次稳定</span><span class="signal-strip">综合评分 {row["composite_score"]:.1f}</span>'
+                    f'<span class="signal-strip">信号价 {row["entry_price"]:.2f}</span></div>'
+                )
+            st.markdown('<div class="decision-card"><b>严格标准 · 三次稳定</b>' + ''.join(rows) + '</div>', unsafe_allow_html=True)
+    with right:
+        if rational_final.empty:
+            message = "改进流程尚未形成最终名单；不以单次扫描替代最终判断。"
+            chips = '<span class="signal-strip">风险辅助等待中</span>'
+        else:
+            new_count = int((rational_final.get("persistence", pd.Series(dtype=str)) == "14:52新进入").sum())
+            stable_count = int((rational_final.get("persistence", pd.Series(dtype=str)).isin(["连续两次", "三次稳定"])).sum())
+            message = "历史样本显示，14:52 新进入表现偏弱，默认不应进入主名单。"
+            chips = f'<span class="signal-strip">稳定确认 {stable_count} 只</span><span class="signal-strip warning">14:52 新进入 {new_count} 只</span>'
+        st.markdown(f'<div class="decision-card risk"><b>改进流程 · 风险提示</b><p class="muted">{message}</p>{chips}</div>', unsafe_allow_html=True)
+
+
 def render_daily_timeline(
     *,
     strict_frame: pd.DataFrame,
@@ -281,8 +373,8 @@ def render_daily_timeline(
     review_strict_frame: pd.DataFrame,
     review_improved_frame: pd.DataFrame,
 ) -> None:
-    st.markdown("## 今日三时点结果")
-    st.caption("每一列都是当时冻结的原始快照；不会用后一个时点的数据覆盖前一个时点。")
+    st.markdown("## 三次扫描记录")
+    st.caption("每一列都是当时冻结的原始快照；用于复核，不会以较晚数据覆盖较早数据。")
     status_by_slot = {
         str(row["slot"]): row
         for row in scan_status_frame.to_dict("records")
@@ -404,8 +496,8 @@ st.caption(status_note)
 
 workspace = st.segmented_control(
     "工作台",
-    ["今日筛选", "次日校验", "历史表现"],
-    default="今日筛选",
+    ["今日决策", "次日校验", "历史研究"],
+    default="今日决策",
     label_visibility="collapsed",
     width="stretch",
 )
@@ -423,7 +515,7 @@ def optional_store_frame(store: ValidationStore, method_name: str, *args: str) -
 if workspace == "次日校验":
     render_validation_page(validation_store)
     st.stop()
-if workspace == "历史表现":
+if workspace == "历史研究":
     render_history_page(validation_store)
     st.stop()
 
@@ -431,28 +523,38 @@ render_scan_countdown()
 st.markdown(
     """
 <div class="mode-guide">
-  <div class="mode-note"><b>严格标准</b><span>初始规则完整保留：现价 ≥ MA5 &gt; MA10 &gt; MA20 &gt; MA60，四条均线均较5日前上升。用于对照，不写入次日校验。</span></div>
-  <div class="mode-note recommended"><b>改进流程 · 风险收紧</b><span>保留实时日K确认，同时要求MA20高于MA60，过滤短期过热、乖离过大与近期异常大阳线；最终名单拒绝14:52突然进入。</span></div>
+  <div class="mode-note"><b>严格标准 · 主策略</b><span>三次均入选才进入今日主名单，并单独进入次日校验与历史研究。</span></div>
+  <div class="mode-note recommended"><b>改进流程 · 风险辅助</b><span>用于识别稳定确认与尾盘新进入风险；不再单独替代严格标准的最终判断。</span></div>
 </div>
     """,
     unsafe_allow_html=True,
 )
 strict_col, rational_col = st.columns(2)
-strict_run = strict_col.button("严格标准扫描", width="stretch", help="完全按初始均线标准执行")
-rational_run = rational_col.button("改进流程扫描", type="primary", width="stretch", help="增加高位过热过滤，并要求14:45与14:52连续通过")
+strict_run = strict_col.button("扫描严格标准", type="primary", width="stretch", help="完全按初始均线标准执行")
+rational_run = rational_col.button("扫描改进流程（风险辅助）", width="stretch", help="增加高位过热过滤，并标记14:52新进入风险")
 scan_mode = "strict" if strict_run else "rational" if rational_run else None
 if scan_mode is None:
     today = datetime.now().date().isoformat()
-    render_daily_timeline(
-        strict_frame=validation_store.strict_frame(today),
-        rational_frame=validation_store.staged_frame(today),
-        final_frame=validation_store.final_frame(today),
-        scan_status_frame=validation_store.scan_status_frame(today),
-        review_status_frame=optional_store_frame(validation_store, "review_status_frame", today),
-        review_strict_frame=optional_store_frame(validation_store, "review_frame", today, "strict"),
-        review_improved_frame=optional_store_frame(validation_store, "review_frame", today, "improved"),
+    strict_today = validation_store.strict_frame(today)
+    rational_today = validation_store.staged_frame(today)
+    final_today = validation_store.final_frame(today)
+    status_today = validation_store.scan_status_frame(today)
+    render_today_decision(
+        strict_frame=strict_today,
+        rational_final=final_today,
+        scan_status_frame=status_today,
     )
-    st.caption("14:52先生成冻结决策版并推送；随后继续原架构完整重扫，复核结果单独保存且不覆盖决策版。")
+    with st.expander("查看三次扫描记录与完整复核", expanded=False):
+        render_daily_timeline(
+            strict_frame=strict_today,
+            rational_frame=rational_today,
+            final_frame=final_today,
+            scan_status_frame=status_today,
+            review_status_frame=optional_store_frame(validation_store, "review_status_frame", today),
+            review_strict_frame=optional_store_frame(validation_store, "review_frame", today, "strict"),
+            review_improved_frame=optional_store_frame(validation_store, "review_frame", today, "improved"),
+        )
+    st.caption("14:52 准时结果用于决策；完整重扫仅作复核，不覆盖冻结记录。")
     st.stop()
 
 scan_mode_label = "严格标准" if scan_mode == "strict" else "改进流程"
@@ -518,15 +620,25 @@ elif not use_demo:
 
 today = scan_now.date().isoformat()
 if not use_demo and in_scan_window:
-    render_daily_timeline(
-        strict_frame=validation_store.strict_frame(today),
-        rational_frame=validation_store.staged_frame(today),
-        final_frame=validation_store.final_frame(today),
-        scan_status_frame=validation_store.scan_status_frame(today),
-        review_status_frame=optional_store_frame(validation_store, "review_status_frame", today),
-        review_strict_frame=optional_store_frame(validation_store, "review_frame", today, "strict"),
-        review_improved_frame=optional_store_frame(validation_store, "review_frame", today, "improved"),
+    strict_today = validation_store.strict_frame(today)
+    rational_today = validation_store.staged_frame(today)
+    final_today = validation_store.final_frame(today)
+    status_today = validation_store.scan_status_frame(today)
+    render_today_decision(
+        strict_frame=strict_today,
+        rational_final=final_today,
+        scan_status_frame=status_today,
     )
+    with st.expander("查看三次扫描记录与完整复核", expanded=False):
+        render_daily_timeline(
+            strict_frame=strict_today,
+            rational_frame=rational_today,
+            final_frame=final_today,
+            scan_status_frame=status_today,
+            review_status_frame=optional_store_frame(validation_store, "review_status_frame", today),
+            review_strict_frame=optional_store_frame(validation_store, "review_frame", today, "strict"),
+            review_improved_frame=optional_store_frame(validation_store, "review_frame", today, "improved"),
+        )
 else:
     demo_container = st.container(border=True)
     render_daily_result_panel(
