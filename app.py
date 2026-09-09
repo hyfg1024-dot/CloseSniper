@@ -585,7 +585,7 @@ if scan_mode is None:
         rational_final=final_today,
         scan_status_frame=status_today,
     )
-    render_ai_observation_panel(validation_store.ai_observation_frame(today))
+    render_ai_observation_panel(optional_store_frame(validation_store, "ai_observation_frame", today))
     with st.expander("查看三次扫描记录与完整复核", expanded=False):
         render_daily_timeline(
             strict_frame=strict_today,
@@ -671,7 +671,7 @@ if not use_demo and in_scan_window:
         rational_final=final_today,
         scan_status_frame=status_today,
     )
-    render_ai_observation_panel(validation_store.ai_observation_frame(today))
+    render_ai_observation_panel(optional_store_frame(validation_store, "ai_observation_frame", today))
     with st.expander("查看三次扫描记录与完整复核", expanded=False):
         render_daily_timeline(
             strict_frame=strict_today,
