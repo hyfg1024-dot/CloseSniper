@@ -739,6 +739,22 @@ class ValidationStore:
         with self.connect() as db:
             return pd.read_sql_query(query, db, params=(trade_date,))
 
+    def strict_two_stage_frame(self, trade_date: str) -> pd.DataFrame:
+        """Strict candidates confirmed at both 14:30 and 14:45 for an observation-only alert."""
+        query = """
+            SELECT a.code, b.name, b.entry_price,
+                   a.score AS score_1430, b.score AS score_1445,
+                   ROUND(0.4 * a.score + 0.6 * b.score, 1) AS watch_score
+            FROM strict_scans sa
+            JOIN strict_candidates a ON a.strict_scan_id=sa.id
+            JOIN strict_scans sb ON sb.trade_date=sa.trade_date AND sb.slot='1445'
+            JOIN strict_candidates b ON b.strict_scan_id=sb.id AND b.code=a.code
+            WHERE sa.trade_date=? AND sa.slot='1430'
+            ORDER BY watch_score DESC, b.score DESC
+        """
+        with self.connect() as db:
+            return pd.read_sql_query(query, db, params=(trade_date,))
+
     def latest_rational_frame(self, trade_date: str) -> pd.DataFrame:
         final = self.final_frame(trade_date)
         if not final.empty:

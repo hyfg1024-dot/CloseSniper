@@ -22,6 +22,7 @@ from src.telegram_service import (
     format_fast_decision_message,
     format_review_message,
     format_scan_issue_message,
+    format_strict_watch_message,
     load_settings,
     send_message,
 )
@@ -161,10 +162,23 @@ def run_regular_slot(
         market_count=result.funnel["全市场"], hard_count=result.hard_count,
         config=cfg.as_dict(), candidates=candidates,
     )
+    telegram = "not_due"
+    if slot == "1445":
+        telegram = send_once(
+            store=store,
+            trade_date=scan_now.date().isoformat(),
+            channel="telegram-strict-watch-1445",
+            message=format_strict_watch_message(
+                trade_date=scan_now.date().isoformat(),
+                candidates=store.strict_two_stage_frame(scan_now.date().isoformat()),
+                generated_at=scan_now,
+            ),
+            sent_at=scan_now,
+        )
     return {
         "status": "ok", "slot": slot, "rational": len(candidates),
         "strict": len(strict_candidates), "attempts": attempt_count,
-        "telegram": "not_due",
+        "telegram": telegram,
     }
 
 

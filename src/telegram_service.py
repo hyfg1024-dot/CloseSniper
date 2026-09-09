@@ -234,6 +234,37 @@ def format_fast_decision_message(
     return "\n".join(lines)
 
 
+def format_strict_watch_message(
+    *,
+    trade_date: str,
+    candidates: pd.DataFrame | Iterable[dict[str, Any]],
+    generated_at: datetime | None = None,
+) -> str:
+    """A deliberately non-actionable early alert before the 14:52 final confirmation."""
+    rows = _records(candidates)
+    lines = [
+        f"👀 CloseSniper｜{trade_date} 严格标准观察提醒",
+        f"确认时间：{(generated_at or datetime.now()):%H:%M:%S}",
+        "口径：14:30 与 14:45 连续两次符合严格标准。",
+        "这只是开始观察，不是最终买入名单；请等待 14:52 第三次确认。",
+        "",
+        f"【连续两次稳定】{len(rows)}只",
+    ]
+    if rows:
+        for index, item in enumerate(rows, 1):
+            lines.append(
+                f"{index}. {item.get('name', '—')}（{item.get('code', '—')}）"
+                f"｜观察分 {_number(item.get('watch_score'))}"
+                f"｜14:30 {_number(item.get('score_1430'))}"
+                f"｜14:45 {_number(item.get('score_1445'))}"
+                f"｜现价 {_number(item.get('entry_price', item.get('price')))}"
+            )
+    else:
+        lines.append("无连续两次符合的股票")
+    lines.extend(["", "仅供策略研究，不构成投资建议。"])
+    return "\n".join(lines)
+
+
 def format_review_message(
     *,
     trade_date: str,

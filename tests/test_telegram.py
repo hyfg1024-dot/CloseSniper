@@ -12,6 +12,7 @@ from src.telegram_service import (
     format_fast_decision_message,
     format_review_message,
     format_scan_issue_message,
+    format_strict_watch_message,
     load_settings,
     save_settings,
 )
@@ -76,6 +77,19 @@ class TelegramTests(unittest.TestCase):
         self.assertIn("完整重扫版将在后台完成后另行发送", fast)
         self.assertIn("完整重扫复核版", review)
         self.assertIn("完整重扫｜严格标准", review)
+
+    def test_strict_watch_message_is_explicitly_not_final(self) -> None:
+        message = format_strict_watch_message(
+            trade_date="2026-09-09",
+            candidates=[{
+                "code": "600001", "name": "观察股", "entry_price": 12.3,
+                "watch_score": 82.2, "score_1430": 80, "score_1445": 83,
+            }],
+        )
+
+        self.assertIn("连续两次", message)
+        self.assertIn("不是最终买入名单", message)
+        self.assertIn("观察股（600001）", message)
 
 
 if __name__ == "__main__":
