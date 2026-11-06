@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 from copy import deepcopy
@@ -50,6 +50,9 @@ class ScanResult:
     hard_count: int
     provider: str
     errors: dict[str, str]
+    daily_history: dict[str, pd.DataFrame] = field(default_factory=dict)
+    concepts: dict[str, list[str]] = field(default_factory=dict)
+    minute_history: dict[str, pd.DataFrame] = field(default_factory=dict)
 
     @property
     def candidates(self) -> pd.DataFrame:
@@ -178,6 +181,8 @@ def run_market_scan(
     restrict_codes: set[str] | None = None,
     prefer_tencent: bool = False,
     cutoff_at: datetime | None = None,
+    fast_minutes: bool = False,
+    analyze_all: bool = False,
 ) -> ScanResult:
     """执行一次完整扫描，供 Streamlit 页面与后台定时任务共同调用。"""
     now = now or datetime.now()
@@ -188,13 +193,15 @@ def run_market_scan(
         if use_demo
         else source._tencent_spot() if prefer_tencent else source.spot()
     )
+    if analyze_all and not use_demo and raw_spot.attrs.get("completeness") != "provider_count_verified":
+        raise MarketDataError("全市场分页总数未经核验，不能生成完整严格名单")
     spot = normalize_spot(raw_spot)
     stage1, funnel = hard_filter(spot, cfg)
     if restrict_codes is not None:
         stage1 = stage1[stage1["code"].isin({str(code).zfill(6) for code in restrict_codes})].copy()
     volume_ratio_missing = not stage1["volume_ratio"].notna().any()
     analysis_limit = min(len(stage1), max(cfg.max_candidates, 80)) if volume_ratio_missing else cfg.max_candidates
-    selected = stage1.head(analysis_limit).copy()
+    selected = stage1.copy() if analyze_all else stage1.head(analysis_limit).copy()
     report(f"硬条件通过 {len(stage1)} 只；取前 {len(selected)} 只做日线与分时确认")
 
     codes = selected["code"].tolist()
@@ -208,7 +215,10 @@ def run_market_scan(
         assert source is not None
         daily_map, daily_errors = parallel_fetch(codes, source.daily)
         report(f"日线完成 {len(daily_map)}/{len(codes)}")
-        if prefer_tencent and cutoff_at is not None:
+        if fast_minutes:
+            from src.strict_deadline import strict_minute
+            minute_map, minute_errors = parallel_fetch(codes, lambda code: strict_minute(code, now), max_workers=3)
+        elif prefer_tencent and cutoff_at is not None:
             # 冻结决策版只处理 14:45 留下的少量股票，并用带硬超时的
             # 东财分钟接口并发读取，避免新浪链路逐只阻塞到收盘以后。
             minute_map, minute_errors = parallel_fetch(
@@ -229,7 +239,7 @@ def run_market_scan(
         errors = {**daily_errors, **minute_errors}
         if codes and (not daily_map or not minute_map):
             raise MarketDataError("候选日线或分时全部读取失败，不能将缺失数据记为无符合条件股票")
-        index_minutes = (
+        index_minutes = strict_minute("sh000001", now) if fast_minutes else (
             source.index_minute_fast(cutoff_at)
             if prefer_tencent and cutoff_at is not None
             else source.index_minute()
@@ -301,4 +311,7 @@ def run_market_scan(
         hard_count=len(stage1),
         provider=str(raw_spot.attrs.get("provider", "免费行情")),
         errors=errors,
+        daily_history=daily_map,
+        concepts=concept_map,
+        minute_history=minute_map,
     )

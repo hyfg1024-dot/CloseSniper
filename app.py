@@ -27,6 +27,7 @@ from src.telegram_service import (
 )
 from src.validation_store import ValidationStore
 from src.activity_ui import render_activity_panel
+from src.strict_schedule import decision_record
 from src.validation_ui import render_history_page, render_validation_page
 from src.ai_observer import AIObserverSettings, load_settings as load_ai_settings, save_settings as save_ai_settings
 
@@ -331,6 +332,10 @@ def _three_stage_strict_frame(frame: pd.DataFrame) -> pd.DataFrame:
             "code": code,
             "name": records["1452"]["name"],
             "entry_price": records["1452"]["entry_price"],
+            "score_1430": float(records["1430"]["score"]),
+            "score_1445": float(records["1445"]["score"]),
+            "score_1452": float(records["1452"]["score"]),
+            "persistence": "三次稳定",
             "composite_score": round(
                 .2 * float(records["1430"]["score"])
                 + .3 * float(records["1445"]["score"])
@@ -345,6 +350,7 @@ def render_today_decision(
     strict_frame: pd.DataFrame,
     rational_final: pd.DataFrame,
     scan_status_frame: pd.DataFrame,
+    decision: dict | None = None,
 ) -> None:
     """The first screen answers only: whether there is a primary signal and why."""
     strict_final = _three_stage_strict_frame(strict_frame)
@@ -363,7 +369,9 @@ def render_today_decision(
     )
     left, right = st.columns([1.55, 1])
     with left:
-        if not ready:
+        if decision and decision["status"] != "success":
+            st.error(f"严格最终名单未能确认：{decision['error_message']}。本次不是正常零候选，迟到复核不会替代准时结果。")
+        elif not ready:
             st.markdown('<div class="decision-card"><b>等待三次扫描完成</b><p class="muted">14:30、14:45、14:52 的快照齐全后，系统会在这里生成严格三次稳定名单。</p></div>', unsafe_allow_html=True)
         elif strict_final.empty:
             st.markdown('<div class="decision-card risk"><b>今日无严格三次稳定标的</b><p class="muted">严格标准不会为了给出名单而放宽；今天宜保持空仓观察。</p></div>', unsafe_allow_html=True)
@@ -378,8 +386,8 @@ def render_today_decision(
             st.markdown('<div class="decision-card"><b>严格标准 · 三次稳定</b>' + ''.join(rows) + '</div>', unsafe_allow_html=True)
     with right:
         if rational_final.empty:
-            message = "改进流程尚未形成最终名单；不以单次扫描替代最终判断。"
-            chips = '<span class="signal-strip">风险辅助等待中</span>'
+            message = "改进流程只作前两次风险观察与独立全市场对照，不再生成或推送最终推荐。"
+            chips = '<span class="signal-strip">仅风险参考</span>'
         else:
             new_count = int((rational_final.get("persistence", pd.Series(dtype=str)) == "14:52新进入").sum())
             stable_count = int((rational_final.get("persistence", pd.Series(dtype=str)).isin(["连续两次", "三次稳定"])).sum())
@@ -416,9 +424,10 @@ def render_daily_timeline(
     review_status_frame: pd.DataFrame,
     review_strict_frame: pd.DataFrame,
     review_improved_frame: pd.DataFrame,
+    decision: dict | None = None,
 ) -> None:
     st.markdown("## 三次扫描记录")
-    st.caption("每一列都是当时冻结的原始快照；用于复核，不会以较晚数据覆盖较早数据。")
+    st.caption("14:30 / 14:45 为完整采样；14:52 只重新确认前两次严格交集。显示实际完成时间，不以迟到重扫替代正式结果。")
     status_by_slot = {
         str(row["slot"]): row
         for row in scan_status_frame.to_dict("records")
@@ -430,14 +439,15 @@ def render_daily_timeline(
         render_daily_result_panel(
             column,
             f"{slot[:2]}:{slot[2:]}",
-            _slot_frame(strict_frame, slot),
-            "该时点严格标准原始结果。",
+            pd.DataFrame() if slot == "1452" and decision and decision["status"] != "success" else _slot_frame(strict_frame, slot),
+            "前两次严格交集的最终复核。" if slot == "1452" else "该时点严格标准原始结果。",
             status_by_slot.get(slot),
         )
 
-    st.markdown("### 改进流程")
-    rational_columns = st.columns(3)
-    for column, slot in zip(rational_columns, ("1430", "1445", "1452"), strict=True):
+    st.markdown("### 改进流程 · 风险辅助")
+    risk_slots = ("1430", "1445", "1452") if not _slot_frame(rational_frame, "1452").empty else ("1430", "1445")
+    rational_columns = st.columns(len(risk_slots))
+    for column, slot in zip(rational_columns, risk_slots, strict=True):
         render_daily_result_panel(
             column,
             f"{slot[:2]}:{slot[2:]}",
@@ -446,15 +456,20 @@ def render_daily_timeline(
             status_by_slot.get(slot),
         )
 
-    st.markdown("### 14:52冻结决策版 · 准时结果")
+    st.caption("改进流程仅提供风险观察；新版14:52不再生成或推送改进流程推荐。")
+    st.markdown("### 严格三次稳定 · 加权最终结果")
+    final_frame = _three_stage_strict_frame(strict_frame)
     final_container = st.container(border=True)
     completed_slots = (
-        set(rational_frame["slot"].astype(str))
-        if not rational_frame.empty and "slot" in rational_frame
+        set(strict_frame["slot"].astype(str))
+        if not strict_frame.empty and "slot" in strict_frame
         else set()
     )
     missing_slots = [slot for slot in ("1430", "1445", "1452") if slot not in completed_slots]
-    if missing_slots:
+    if decision and decision["status"] != "success":
+        with final_container:
+            st.error(f"严格最终结果无法确认：{decision['error_message']}。这不等于零候选。")
+    elif missing_slots:
         missing_text = "、".join(f"{slot[:2]}:{slot[2:]}" for slot in missing_slots)
         with final_container:
             failed_slots = [slot for slot in missing_slots if status_by_slot.get(slot, {}).get("status") == "failed"]
@@ -465,20 +480,20 @@ def render_daily_timeline(
                 st.info(f"尚未生成冻结决策版：等待 {missing_text} 原始节点完成。")
     elif final_frame.empty:
         with final_container:
-            st.warning("14:52已冻结，准时决策版符合条件 0 只。该结果进入次日校验。")
+            st.info("严格终判已完成，三次稳定 0 只；本日不新增次日校验股票。")
     else:
         render_daily_result_panel(
             final_container,
             "14:52冻结名单",
             final_frame,
-            "用于当日决策及次日校验：20% × 14:30评分 + 30% × 14:45评分 + 50% × 14:52评分；只复核14:45候选池。",
+            "进入严格次日校验：20% × 14:30评分 + 30% × 14:45评分 + 50% × 14:52评分。阈值及评分公式保持不变。",
         )
 
-    st.markdown("### 完整重扫复核版 · 原架构保留")
+    st.markdown("### 全市场对照 · 14:54 独立运行")
     review_container = st.container(border=True)
     if review_status_frame.empty:
         with review_container:
-            st.info("等待14:52冻结决策版完成后，后台开始原架构完整重扫。")
+            st.info("14:54 独立运行原架构完整重扫，不影响14:52严格终判。")
     else:
         review_status = review_status_frame.iloc[0].to_dict()
         state = str(review_status.get("status", ""))
@@ -494,7 +509,7 @@ def render_daily_timeline(
             with review_container:
                 if review_status.get("error_message"):
                     st.warning(str(review_status["error_message"])[:300])
-                st.caption(f"实际完成时间：{completed_text}。严格结果用于补齐第三次筛选，三次均入选才进入严格次日校验；改进流程用于风险对照。")
+                st.caption(f"实际完成时间：{completed_text}。本区保留全市场对照，不修改14:52严格终判及其校验名单。")
                 left, right = st.columns(2)
                 with left:
                     st.markdown("#### 严格标准 · 完整重扫")
@@ -591,6 +606,7 @@ if scan_mode is None:
         strict_frame=strict_today,
         rational_final=final_today,
         scan_status_frame=status_today,
+        decision=decision_record(validation_store, today),
     )
     render_ai_observation_panel(optional_store_frame(validation_store, "ai_observation_frame", today))
     with st.expander("查看三次扫描记录与完整复核", expanded=False):
@@ -602,6 +618,7 @@ if scan_mode is None:
             review_status_frame=optional_store_frame(validation_store, "review_status_frame", today),
             review_strict_frame=optional_store_frame(validation_store, "review_frame", today, "strict"),
             review_improved_frame=optional_store_frame(validation_store, "review_frame", today, "improved"),
+            decision=decision_record(validation_store, today),
         )
     st.caption("严格标准三次均入选后进入次日校验；各节点的实际完成时间与延迟见扫描运行记录。")
     st.stop()
@@ -677,6 +694,7 @@ if not use_demo and in_scan_window:
         strict_frame=strict_today,
         rational_final=final_today,
         scan_status_frame=status_today,
+        decision=decision_record(validation_store, today),
     )
     render_ai_observation_panel(optional_store_frame(validation_store, "ai_observation_frame", today))
     with st.expander("查看三次扫描记录与完整复核", expanded=False):
@@ -688,6 +706,7 @@ if not use_demo and in_scan_window:
             review_status_frame=optional_store_frame(validation_store, "review_status_frame", today),
             review_strict_frame=optional_store_frame(validation_store, "review_frame", today, "strict"),
             review_improved_frame=optional_store_frame(validation_store, "review_frame", today, "improved"),
+            decision=decision_record(validation_store, today),
         )
 else:
     demo_container = st.container(border=True)

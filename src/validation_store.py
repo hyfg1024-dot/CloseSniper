@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import sqlite3
@@ -23,15 +24,16 @@ LEGACY_DB_PATH = PROJECT_ROOT / "data" / "panpanc.db"
 
 
 class ValidationStore:
-    def __init__(self, path: str | Path = DEFAULT_DB_PATH) -> None:
+    def __init__(self, path: str | Path = DEFAULT_DB_PATH, *, connection_timeout: float = 20) -> None:
         self.path = Path(path)
+        self.connection_timeout = connection_timeout
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path == DEFAULT_DB_PATH and not self.path.exists() and LEGACY_DB_PATH.exists():
             shutil.copy2(LEGACY_DB_PATH, self.path)
         self._init_schema()
 
     def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=20)
+        connection = sqlite3.connect(self.path, timeout=self.connection_timeout)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
@@ -235,6 +237,34 @@ class ValidationStore:
                     return_pct REAL NOT NULL,
                     UNIQUE(strict_signal_id, observation_slot)
                 );
+                CREATE TABLE IF NOT EXISTS strict_scan_cache (
+                    trade_date TEXT NOT NULL, slot TEXT NOT NULL,
+                    saved_at TEXT NOT NULL, config_json TEXT NOT NULL,
+                    daily_json TEXT NOT NULL, concepts_json TEXT NOT NULL,
+                    PRIMARY KEY(trade_date, slot)
+                );
+                CREATE TABLE IF NOT EXISTS strict_decisions (
+                    trade_date TEXT PRIMARY KEY, status TEXT NOT NULL,
+                    started_at TEXT NOT NULL, completed_at TEXT NOT NULL,
+                    error_message TEXT, pool_count INTEGER NOT NULL,
+                    candidates_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS market_evidence (
+                    id INTEGER PRIMARY KEY, kind TEXT NOT NULL,
+                    reference_id TEXT NOT NULL, code TEXT NOT NULL, trade_date TEXT NOT NULL,
+                    captured_at TEXT NOT NULL, provider TEXT NOT NULL,
+                    payload_json TEXT NOT NULL, sha256 TEXT NOT NULL,
+                    UNIQUE(kind, reference_id, code, trade_date, sha256)
+                );
+                CREATE TABLE IF NOT EXISTS validation_quality (
+                    kind TEXT NOT NULL, signal_id INTEGER NOT NULL,
+                    status TEXT NOT NULL, reason TEXT NOT NULL, checked_at TEXT NOT NULL,
+                    PRIMARY KEY(kind, signal_id)
+                );
+                CREATE TABLE IF NOT EXISTS validation_revisions (
+                    id INTEGER PRIMARY KEY, kind TEXT NOT NULL, signal_id INTEGER NOT NULL,
+                    replaced_at TEXT NOT NULL, prior_json TEXT NOT NULL
+                );
                 """
             )
             existing = {
@@ -265,6 +295,55 @@ class ValidationStore:
             for column in ("price_0935", "price_1030", "return_0530", "return_3160"):
                 if column not in strict_validation_columns:
                     db.execute(f"ALTER TABLE strict_validations ADD COLUMN {column} REAL")
+
+    def save_market_evidence(self, *, kind: str, signal_id: int | str, code: str,
+                             trade_date: str, frame: pd.DataFrame, provider: str) -> None:
+        """Append the actual input bars; never overwrite prior evidence."""
+        payload = frame.to_json(orient="table", date_format="iso", force_ascii=False)
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        with self.connect() as db:
+            db.execute(
+                """INSERT OR IGNORE INTO market_evidence
+                (kind,reference_id,code,trade_date,captured_at,provider,payload_json,sha256)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                (kind, str(signal_id), code, trade_date, datetime.now().isoformat(timespec="seconds"),
+                 provider, payload, digest),
+            )
+
+    def save_scan_evidence(self, *, slot: str, result: Any, captured_at: datetime) -> None:
+        day = captured_at.date().isoformat()
+        self.save_market_evidence(kind="scan_quotes", signal_id=slot, code="ALL", trade_date=day,
+                                  frame=result.raw_spot, provider=result.provider)
+        metadata = {**result.raw_spot.attrs, "hard_count": result.hard_count,
+                    "analyzed_count": len(result.result_frame), "captured_at": captured_at.isoformat(),
+                    "errors": json.dumps(result.errors, ensure_ascii=False)}
+        self.save_market_evidence(kind="scan_metadata", signal_id=slot, code="ALL", trade_date=day,
+                                  frame=pd.DataFrame([metadata]), provider=result.provider)
+        for kind, frames in (("scan_daily", result.daily_history), ("scan_minute", result.minute_history)):
+            for code, frame in frames.items():
+                self.save_market_evidence(kind=kind, signal_id=slot, code=code, trade_date=day,
+                                          frame=frame, provider=result.provider)
+
+    def mark_validation_quality(self, kind: str, signal_id: int, status: str, reason: str = "") -> None:
+        if kind not in {"strict", "improved"} or status not in {"verified", "unverified", "invalid"}:
+            raise ValueError("未知校验质量标记")
+        with self.connect() as db:
+            db.execute(
+                """INSERT INTO validation_quality(kind,signal_id,status,reason,checked_at) VALUES (?,?,?,?,?)
+                ON CONFLICT(kind,signal_id) DO UPDATE SET status=excluded.status,reason=excluded.reason,
+                checked_at=excluded.checked_at""",
+                (kind, signal_id, status, reason, datetime.now().isoformat(timespec="seconds")),
+            )
+
+    @staticmethod
+    def _archive_validation(db: sqlite3.Connection, kind: str, signal_id: int,
+                            values: dict[str, Any]) -> None:
+        table, key = ("strict_validations", "strict_signal_id") if kind == "strict" else ("validations", "signal_id")
+        old = db.execute(f"SELECT * FROM {table} WHERE {key}=?", (signal_id,)).fetchone()
+        if old and any(old[column] != value for column, value in values.items() if column in old.keys()):
+            db.execute("INSERT INTO validation_revisions(kind,signal_id,replaced_at,prior_json) VALUES (?,?,?,?)",
+                       (kind, signal_id, datetime.now().isoformat(timespec="seconds"),
+                        json.dumps(dict(old), ensure_ascii=False)))
 
     def save_staged_scan(
         self,
@@ -615,6 +694,10 @@ class ValidationStore:
             raise ValueError(f"未知扫描节点：{slot}")
         trade_date = scanned_at.date().isoformat()
         with self.connect() as db:
+            # Once the timed decision is frozen, manual/full-review scans cannot
+            # rewrite its inputs or turn a failed deadline into a late signal.
+            if db.execute("SELECT 1 FROM strict_decisions WHERE trade_date=?", (trade_date,)).fetchone():
+                return
             db.execute(
                 """
                 INSERT INTO strict_scans (trade_date, slot, scanned_at, provider)
@@ -642,6 +725,9 @@ class ValidationStore:
     def rebuild_strict_final_signals(self, trade_date: str) -> int:
         """仅把严格标准三个时点均入选的股票写入独立校验队列。"""
         with self.connect() as db:
+            decision = db.execute("SELECT status FROM strict_decisions WHERE trade_date=?", (trade_date,)).fetchone()
+            if decision and decision["status"] != "success":
+                return 0
             rows = db.execute(
                 """
                 SELECT a.code, a.name, a.score AS score_1430,
@@ -700,9 +786,11 @@ class ValidationStore:
                        s.signal_date, v.validation_date, v.price_1000
                 FROM strict_final_signals s
                 LEFT JOIN strict_validations v ON v.strict_signal_id=s.id
+                LEFT JOIN validation_quality q ON q.kind='strict' AND q.signal_id=s.id
                 WHERE s.signal_date < ? AND (
-                    v.id IS NULL OR v.price_0935 IS NULL OR v.price_1030 IS NULL
+                    v.id IS NULL OR v.price_0935 IS NULL OR v.price_1030 IS NULL OR q.status IN ('invalid','unverified')
                 )
+                AND NOT EXISTS (SELECT 1 FROM strict_decisions d WHERE d.trade_date=s.signal_date AND d.status!='success')
                 ORDER BY s.signal_date, s.composite_score DESC
                 """,
                 (before_date,),
@@ -716,6 +804,7 @@ class ValidationStore:
             "calculated_at",
         ]
         with self.connect() as db:
+            self._archive_validation(db, "strict", strict_signal_id, {column: values.get(column) for column in columns})
             db.execute(
                 f"""
                 INSERT OR REPLACE INTO strict_validations
@@ -732,8 +821,11 @@ class ValidationStore:
                    s.persistence, v.validation_date, v.open_return, v.return_1000,
                    v.max_return_1000, v.max_drawdown_1000, v.calculated_at
                    , v.price_0935, v.price_1030, v.return_0530, v.return_3160
+                   , COALESCE(q.status,'legacy') AS data_quality, q.reason AS quality_reason
             FROM strict_final_signals s
             LEFT JOIN strict_validations v ON v.strict_signal_id=s.id
+            LEFT JOIN validation_quality q ON q.kind='strict' AND q.signal_id=s.id
+            WHERE NOT EXISTS (SELECT 1 FROM strict_decisions d WHERE d.trade_date=s.signal_date AND d.status!='success')
             ORDER BY s.signal_date DESC, s.composite_score DESC
         """
         with self.connect() as db:
@@ -751,22 +843,24 @@ class ValidationStore:
                 """
                 SELECT s.id AS strict_signal_id, s.code, s.name, s.entry_price, s.signal_date
                 FROM strict_final_signals s
-                LEFT JOIN strict_validations v ON v.strict_signal_id=s.id
                 WHERE s.signal_date=(
                     SELECT MAX(trade_date) FROM strict_scans WHERE trade_date < ?
-                ) AND v.id IS NULL
+                ) AND NOT EXISTS (SELECT 1 FROM strict_exit_observations o
+                                  WHERE o.strict_signal_id=s.id AND o.observation_slot='1000')
+                AND NOT EXISTS (SELECT 1 FROM strict_decisions d WHERE d.trade_date=s.signal_date AND d.status!='success')
                 ORDER BY s.composite_score DESC
                 """, (trade_date,),
             ).fetchall()
 
-    def save_strict_exit_observation(self, strict_signal_id: int, slot: str, observed_at: datetime, price: float, return_pct: float) -> None:
+    def save_strict_exit_observation(self, strict_signal_id: int, slot: str, observed_at: datetime, price: float, return_pct: float) -> bool:
         with self.connect() as db:
-            db.execute(
-                """INSERT OR REPLACE INTO strict_exit_observations
+            cursor = db.execute(
+                """INSERT OR IGNORE INTO strict_exit_observations
                 (strict_signal_id, observation_slot, observed_at, observed_price, return_pct)
                 VALUES (?, ?, ?, ?, ?)""",
                 (strict_signal_id, slot, observed_at.isoformat(timespec="seconds"), price, return_pct),
             )
+            return cursor.rowcount == 1
 
     def strict_exit_observation_frame(self, trade_date: str) -> pd.DataFrame:
         with self.connect() as db:
@@ -782,6 +876,7 @@ class ValidationStore:
         frame = self.strict_validation_frame()
         if frame.empty:
             return None
+        frame = frame.loc[~frame["data_quality"].isin(["invalid", "unverified"])]
         values = frame["return_1000"].dropna()
         if values.empty:
             return None
@@ -992,7 +1087,8 @@ class ValidationStore:
                 JOIN scans sc ON sc.id = s.scan_id
                 LEFT JOIN validations v ON v.signal_id = s.id
                 LEFT JOIN open_snapshots o ON o.signal_id = s.id
-                WHERE sc.trade_date < ? AND (v.id IS NULL OR v.price_1030 IS NULL)
+                LEFT JOIN validation_quality q ON q.kind='improved' AND q.signal_id=s.id
+                WHERE sc.trade_date < ? AND (v.id IS NULL OR v.price_1030 IS NULL OR q.status IN ('invalid','unverified'))
                 ORDER BY sc.trade_date, s.score DESC
                 """,
                 (before_date,),
@@ -1022,6 +1118,7 @@ class ValidationStore:
             "index_1030_return", "calculated_at",
         ]
         with self.connect() as db:
+            self._archive_validation(db, "improved", signal_id, {column: values.get(column) for column in columns})
             db.execute(
                 f"""
                 INSERT OR REPLACE INTO validations
@@ -1044,10 +1141,12 @@ class ValidationStore:
                    v.max_drawdown, v.index_open_return, v.index_0945_return,
                    v.price_1030, v.return_1030, v.max_return_1030,
                    v.max_drawdown_1030, v.index_1030_return
+                   , COALESCE(q.status,'legacy') AS data_quality, q.reason AS quality_reason
             FROM signals s
             JOIN scans sc ON sc.id = s.scan_id
             LEFT JOIN validations v ON v.signal_id = s.id
             LEFT JOIN open_snapshots o ON o.signal_id = s.id
+            LEFT JOIN validation_quality q ON q.kind='improved' AND q.signal_id=s.id
             ORDER BY sc.trade_date DESC, s.score DESC
         """
         with self.connect() as db:

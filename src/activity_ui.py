@@ -1,11 +1,12 @@
 from datetime import datetime, time
 
 import streamlit as st
+import json
 
 from src.activity import build_activity_frame
 
 
-@st.fragment(run_every=30)
+@st.fragment(run_every=5)
 def render_activity_panel(store, *, expanded: bool = False) -> None:
     """Read fresh background state on every screen, including days with no signals."""
     frame = build_activity_frame(store)
@@ -25,6 +26,15 @@ def render_activity_panel(store, *, expanded: bool = False) -> None:
         c2.metric("最近三次稳定信号日", signal_date or "暂无")
         c3.metric("最近严格校验日", validation_date or "暂无")
         now = datetime.now()
+        with store.connect() as db:
+            decision = db.execute("SELECT * FROM strict_decisions WHERE trade_date=?", (now.date().isoformat(),)).fetchone()
+        if decision:
+            if decision["status"] == "success":
+                final = json.loads(decision["candidates_json"])
+                names = "、".join(f"{row['name']}（{row['code']}）" for row in final) or "无符合条件标的"
+                st.success(f"严格三次稳定最终结果：{names}。完成于 {decision['completed_at'][11:19]}。")
+            else:
+                st.error(f"严格最终结果未能确认：{decision['error_message']}。不可将其理解为零候选。")
         if now.weekday() < 5 and now.time() >= time(15, 0) and latest["trade_date"] < now.date().isoformat():
             st.warning("今日尚无扫描记录。若今天开市，请检查 Mac 是否开机、联网及定时任务；休市日不产生行情。")
         elif (latest["status"] == "partial" and latest["trade_date"] == now.date().isoformat()
@@ -61,4 +71,4 @@ def render_activity_panel(store, *, expanded: bool = False) -> None:
                          "三次稳定", "已校验", "实际完成时间", "延迟节点", "说明"]],
                 hide_index=True, width="stretch", height=300,
             )
-            st.caption("0＝该次扫描已保存但无入选；空白＝未保存该次严格结果。完成超过计划时间 3 分钟标记为延迟。数据读取异常单独标记；旧版本未保存的逐股错误无法事后还原。页面每 30 秒刷新运行记录。")
+            st.caption("0＝已保存但无入选；空白＝未保存严格结果。14:52仅复核前两次严格交集，完整全市场对照另存。14:52节点在14:53或以后完成即标记迟到；前两次超过3分钟标记延迟。页面每5秒刷新终判与运行记录。")

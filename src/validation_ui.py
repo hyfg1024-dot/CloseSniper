@@ -6,13 +6,32 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.data_source import AkshareSource
+from src.validation_source import BoundedValidationSource
 from src.validation_service import (
     capture_open_pending,
     validate_pending,
     validate_strict_three_stage_pending,
 )
 from src.validation_store import ValidationStore
+from src.trading_calendar import CalendarUnavailable, is_trading_day
+
+
+def usable_validations(frame: pd.DataFrame) -> pd.DataFrame:
+    if "data_quality" not in frame:
+        return frame.copy()
+    return frame.loc[~frame["data_quality"].isin(["invalid", "unverified"])].copy()
+
+
+def render_quality_notice(frame: pd.DataFrame, label: str) -> None:
+    if frame.empty or "data_quality" not in frame:
+        return
+    excluded = frame.loc[frame["data_quality"].isin(["invalid", "unverified"])]
+    if not excluded.empty:
+        st.warning(f"{label}：{len(excluded)} 条日期异常或缺少原始依据的记录已隔离，不计入收益统计；原记录未删除。")
+        with st.expander(f"{label} · 待核验记录"):
+            st.dataframe(excluded[["signal_date", "code", "name", "validation_date", "quality_reason"]].rename(
+                columns={"signal_date": "信号日", "code": "代码", "name": "名称", "validation_date": "原校验日", "quality_reason": "原因"}),
+                hide_index=True, width="stretch")
 
 
 def render_validation_page(store: ValidationStore) -> None:
@@ -32,8 +51,9 @@ def render_validation_page(store: ValidationStore) -> None:
     store.rebuild_all_strict_final_signals()
     strict_frame = store.strict_validation_frame()
     strict_pending = store.pending_strict_final_signals(now.date().isoformat())
+    recent_cutoff = (now.date() - timedelta(days=14)).isoformat()
     should_auto = any(
-        (
+        str(row["signal_date"]) >= recent_cutoff and ((
             row["price_0945"] is None
             and now.time() >= time(9, 45)
         )
@@ -41,11 +61,15 @@ def render_validation_page(store: ValidationStore) -> None:
             row["price_0945"] is not None
             and row["price_1030"] is None
             and now.time() >= time(10, 30)
-        )
+        ))
         for row in pending_rows
     )
-    early_window = time(9, 30) <= now.time() < time(9, 51)
-    recent_cutoff = (now.date() - timedelta(days=14)).isoformat()
+    try:
+        session_open = is_trading_day(now.date())
+    except CalendarUnavailable as exc:
+        session_open = False
+        st.warning(str(exc))
+    early_window = session_open and time(9, 30) <= now.time() < time(9, 51)
     strict_should_auto = now.time() >= time(10, 0) and any(
         str(row["validation_date"] or row["signal_date"]) >= recent_cutoff for row in strict_pending
     )
@@ -70,7 +94,7 @@ def render_validation_page(store: ValidationStore) -> None:
     if early_update or backfill or should_auto or strict_should_auto:
         with st.status("正在读取次日 9:30–10:30 行情…", expanded=True) as status:
             try:
-                source = AkshareSource()
+                source = BoundedValidationSource()
                 if early_update:
                     open_summary = capture_open_pending(store, source, now)
                     status.write(
@@ -79,7 +103,7 @@ def render_validation_page(store: ValidationStore) -> None:
                         f"异常 {len(open_summary['errors'])} 只"
                     )
                 if backfill or should_auto or (early_update and now.time() >= time(9, 45)):
-                    summary = validate_pending(store, source, now)
+                    summary = validate_pending(store, source, now, include_history=backfill)
                     status.write(
                         f"写入 9:45 数据 {summary['completed_0945']} 只，"
                         f"补齐 10:30 数据 {summary['completed_1030']} 只，"
@@ -100,6 +124,10 @@ def render_validation_page(store: ValidationStore) -> None:
                 status.update(label="校验暂未完成", state="error")
                 st.error(f"校验行情读取失败：{exc}")
 
+    render_quality_notice(frame, "综合历史校验")
+    render_quality_notice(strict_frame, "严格历史校验")
+    frame = usable_validations(frame)
+    strict_frame = usable_validations(strict_frame)
     pending = len(pending_rows)
     open_captured = frame["open_return"].notna().sum() if not frame.empty else 0
     completed_0945 = frame["price_0945"].notna().sum() if not frame.empty else 0
@@ -179,6 +207,7 @@ def _render_strict_three_stage_half_hour(
     heading: str = "严格标准 · 三次稳定 · 开盘半小时",
 ) -> None:
     """严格口径单独统计，避免与改进流程的最终名单混算。"""
+    frame = usable_validations(frame)
     st.markdown(f"### {heading}")
     st.caption("只统计 14:30、14:45、14:52 三次均入选的严格标准股票。三段口径：开盘首分钟相对信号价、9:35–10:00 区间、10:00–10:30 区间。盈亏比＝平均盈利 ÷ 平均亏损绝对值。")
     completed = frame.dropna(subset=["validation_date"]).copy() if not frame.empty else pd.DataFrame()
@@ -243,6 +272,7 @@ def _render_strict_exit_observation(
     heading: str = "严格三次稳定 · 10:00 兑现／风控观察",
 ) -> None:
     """Show the evidence behind the live 10:00 checkpoint without implying a sell order."""
+    frame = usable_validations(frame)
     st.markdown(f"### {heading}")
     completed = frame.dropna(subset=["validation_date"]).copy() if not frame.empty else pd.DataFrame()
     if completed.empty:
@@ -305,6 +335,10 @@ def render_history_page(store: ValidationStore) -> None:
     frame = store.validation_frame().dropna(subset=["price_0945"]).copy()
     scans = store.scan_frame()
     strict_frame = store.strict_validation_frame()
+    render_quality_notice(frame, "综合历史校验")
+    render_quality_notice(strict_frame, "严格历史校验")
+    frame = usable_validations(frame)
+    strict_frame = usable_validations(strict_frame)
     _render_strict_three_stage_half_hour(
         strict_frame,
         store.pending_strict_final_signals(datetime.now().date().isoformat()),

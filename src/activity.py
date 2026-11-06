@@ -50,11 +50,13 @@ def build_activity_frame(store: Any, limit: int = 20) -> pd.DataFrame:
             FROM strict_final_signals s LEFT JOIN strict_validations v ON v.strict_signal_id=s.id
             WHERE s.signal_date>=? GROUP BY s.signal_date""", db, params=(lower,),
         )
+        decisions = pd.read_sql_query("SELECT * FROM strict_decisions WHERE trade_date>=?", db, params=(lower,))
 
     snapshot_map = {(r["trade_date"], r["slot"]): r for r in snapshots.to_dict("records")}
     run_map = {(r["trade_date"], r["slot"]): r for r in runs.to_dict("records")}
     review_map = {r["trade_date"]: r for r in reviews.to_dict("records")}
     final_map = {r["trade_date"]: r for r in finals.to_dict("records")}
+    decision_map = {r["trade_date"]: r for r in decisions.to_dict("records")}
     rows: list[dict[str, Any]] = []
     for day in days:
         row: dict[str, Any] = {"trade_date": day}
@@ -66,7 +68,7 @@ def build_activity_frame(store: Any, limit: int = 20) -> pd.DataFrame:
         for slot in SLOTS:
             snapshot = snapshot_map.get((day, slot))
             run = run_map.get((day, slot), {})
-            review = review_map.get(day, {}) if slot == "1452" else {}
+            review = review_map.get(day, {}) if slot == "1452" and day not in decision_map else {}
             slot_issues = [str(value) for value in (run.get("error_message"), review.get("error_message"))
                            if value is not None and pd.notna(value) and str(value).strip()]
             if slot_issues:
@@ -79,7 +81,7 @@ def build_activity_frame(store: Any, limit: int = 20) -> pd.DataFrame:
                 scheduled = datetime.fromisoformat(f"{day}T{slot[:2]}:{slot[2:]}:00")
                 delay = (datetime.fromisoformat(completed) - scheduled).total_seconds() / 60
                 delays.append(max(0.0, delay))
-                if delay > 3:
+                if delay >= (1 if slot == "1452" else 3):
                     delayed.append(f"{slot[:2]}:{slot[2:]}")
             else:
                 row[f"strict_{slot}"] = None
@@ -103,6 +105,15 @@ def build_activity_frame(store: Any, limit: int = 20) -> pd.DataFrame:
         else:
             status = "partial"
         final = final_map.get(day, {})
+        decision = decision_map.get(day)
+        if decision and decision["status"] != "success":
+            status = "failed"
+            row["strict_1452"] = None
+            row["slot_status_1452"] = "failed"
+            final = {}
+            issues.append("严格准时终判：" + str(decision["error_message"] or "未确认"))
+        if decision:
+            finished.append(decision["completed_at"])
         row.update(
             status=status,
             strict_final_count=int(final.get("final_count", 0)),

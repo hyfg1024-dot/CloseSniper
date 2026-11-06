@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import plistlib
+import json
+from datetime import datetime
 import shutil
 import subprocess
 import sys
@@ -10,6 +12,7 @@ from pathlib import Path
 
 VALIDATION_LABEL = "com.closesniper.daily-validation"
 SCAN_SLOTS = {"1430": (14, 30), "1445": (14, 45), "1452": (14, 52)}
+REVIEW_LABEL = "com.closesniper.full-review"
 LAUNCHD_WEEKDAYS = range(1, 6)  # launchd: Sunday=0/7, Monday=1, Friday=5
 LEGACY_LABELS = [
     "com.panpanc.daily-validation",
@@ -32,6 +35,25 @@ def weekday_intervals(hour: int, minute: int) -> list[dict[str, int]]:
         {"Weekday": weekday, "Hour": hour, "Minute": minute}
         for weekday in LAUNCHD_WEEKDAYS
     ]
+
+
+def update_home_registration(project: Path) -> None:
+    registry = Path.home() / "Applications" / "12Agent" / "programs.json"
+    if not registry.exists():
+        return
+    programs = json.loads(registry.read_text(encoding="utf-8"))
+    for entry in programs:
+        if entry.get("id") == "close-sniper" and Path(entry.get("cwd", "")).resolve() == project:
+            entry["schedule"] = "工作日 09:45 / 10:01 / 10:30 校验；14:30 / 14:45 采样；14:52 严格限时终判；14:54 独立对照"
+            labels = entry.setdefault("schedule_labels", [])
+            if REVIEW_LABEL not in labels:
+                labels.append(REVIEW_LABEL)
+            backup = registry.with_name(f"programs.before-closesniper-deadline-{datetime.now():%Y%m%d%H%M%S%f}.json")
+            shutil.copy2(registry, backup)
+            temporary = registry.with_suffix(".closesniper.tmp")
+            temporary.write_text(json.dumps(programs, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            temporary.replace(registry)
+            break
 
 
 def main() -> None:
@@ -108,8 +130,19 @@ def main() -> None:
         }
         install_agent(domain, scan_plist, label, scan_payload)
 
+    review_payload = {
+        **scan_payload,
+        "Label": REVIEW_LABEL,
+        "ProgramArguments": [str(python), str(scanner), "--review"],
+        "StartCalendarInterval": weekday_intervals(14, 54),
+        "StandardOutPath": str(log_dir / "review.log"),
+        "StandardErrorPath": str(log_dir / "review-error.log"),
+    }
+    install_agent(domain, agent_dir / f"{REVIEW_LABEL}.plist", REVIEW_LABEL, review_payload)
+    update_home_registration(project)
+
     print(f"后台环境：{install_dir}")
-    print("已安装：工作日14:30、14:45静默采样；14:52先生成冻结决策版，再运行严格与改进两套完整复核；09:45、10:01、10:30自动校验/观察。")
+    print("已安装：14:30/14:45采样限时150秒；14:52严格终判，14:52:40计算截止；14:54独立全市场对照；09:45/10:01/10:30校验。")
 
 
 if __name__ == "__main__":

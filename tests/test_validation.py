@@ -1,11 +1,16 @@
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 
 import pandas as pd
 
 from src.validation_service import (
+    _calculate_half_hour,
+    _calculate_strict_windows,
+    _calculate_windows,
+    _complete_morning_window,
+    _minutes_for_signal,
     capture_strict_exit_observation,
     capture_open_pending,
     validate_pending,
@@ -366,6 +371,109 @@ class ValidationTests(unittest.TestCase):
         self.assertAlmostEqual(row["captured_return"], 1.0)
         self.assertTrue(pd.isna(row["return_0945"]))
         self.assertEqual(self.store.pending_count("2026-08-03"), 1)
+
+    def test_minute_windows_require_exact_endpoint_and_no_internal_gaps(self):
+        complete = minute_frame("2026-08-03", 10)
+        self.assertIsNotNone(_calculate_half_hour(complete, 10))
+        self.assertIsNotNone(_complete_morning_window(complete.iloc[1:], time(10, 30)))
+        self.assertIsNone(_complete_morning_window(complete.iloc[2:], time(10, 30)))
+        for index in (5, 15, 30):
+            self.assertIsNone(_calculate_half_hour(complete.drop(index=index), 10))
+        self.assertIsNone(_calculate_windows(complete.iloc[:-1], 10, include_1030=True))
+        self.assertIsNone(_calculate_windows(complete.drop(index=15), 10, include_1030=False))
+        duplicate = pd.concat([complete, complete.iloc[[5]]], ignore_index=True)
+        self.assertIsNone(_calculate_half_hour(duplicate, 10))
+
+    def test_minute_windows_reject_zero_negative_nan_and_inconsistent_prices(self):
+        for column, value in (("open", 0), ("close", -1), ("close", float("nan")),
+                              ("high", float("inf")), ("high", 1)):
+            frame = minute_frame("2026-08-03", 10)
+            frame.loc[0, column] = value
+            self.assertIsNone(_calculate_half_hour(frame, 10), (column, value))
+        self.assertIsNone(_calculate_half_hour(minute_frame("2026-08-03", 10), float("nan")))
+
+    def test_next_day_fetch_never_substitutes_later_available_day(self):
+        class Source:
+            def minute_between(self, code, start_date, end_date):
+                self.requested = (start_date, end_date)
+                raise RuntimeError("historical unavailable")
+
+            def minute_recent(self, code):
+                return minute_frame("2026-10-09", 10)
+
+        source = Source()
+        frame = _minutes_for_signal(source, "600001", "2026-09-30", datetime(2026, 10, 12))
+        self.assertEqual(source.requested, ("2026-10-08", "2026-10-08"))
+        self.assertTrue(frame.empty)
+
+    def test_ordinary_and_open_validation_do_not_drift_to_later_session(self):
+        self.store.freeze_scan(
+            scanned_at=datetime(2026, 8, 24, 14, 52), provider="fixture", market_count=1,
+            hard_count=1, config={}, candidates=[{"code": "600001", "name": "fixture", "price": 10, "score": 80}],
+        )
+        class Source(RecentOnlySource):
+            def index_minute_recent(self):
+                return minute_frame("2026-09-03", 3800)
+        summary = validate_pending(self.store, Source(), now=datetime(2026, 9, 3, 10, 31))
+        self.assertEqual(summary["completed"], 0)
+        self.assertIn("2026-08-25", summary["skipped_reasons"]["600001"])
+        captured = capture_open_pending(self.store, Source(), now=datetime(2026, 9, 3, 9, 35))
+        self.assertEqual(captured["captured"], 0)
+        self.assertIn("2026-08-25", captured["skipped_reasons"]["600001"])
+
+    def test_strict_1000_can_be_saved_then_enriched_at_exact_1030(self):
+        candidate = {"code": "600001", "name": "fixture", "price": 10.0, "score": 80}
+        for slot in ("1430", "1445", "1452"):
+            self.store.save_strict_scan(slot=slot, scanned_at=datetime(2026, 7, 31, 14, int(slot[2:])),
+                                        provider="fixture", candidates=[candidate])
+        self.store.rebuild_strict_final_signals("2026-07-31")
+        early = validate_strict_three_stage_pending(self.store, FakeSource(), now=datetime(2026, 8, 3, 10, 1))
+        self.assertEqual(early["completed"], 1)
+        row = self.store.strict_validation_frame().iloc[0]
+        self.assertAlmostEqual(row["return_1000"], 6)
+        self.assertTrue(pd.isna(row["price_1030"]))
+        later = validate_strict_three_stage_pending(self.store, FakeSource(), now=datetime(2026, 8, 3, 10, 31))
+        self.assertEqual(later["completed"], 1)
+        self.assertAlmostEqual(self.store.strict_validation_frame().iloc[0]["price_1030"], 11.2)
+
+    def test_live_observation_is_frozen_and_not_replaced_at_1030(self):
+        candidate = {"code": "600001", "name": "fixture", "price": 10.0, "score": 80}
+        for slot in ("1430", "1445", "1452"):
+            self.store.save_strict_scan(slot=slot, scanned_at=datetime(2026, 7, 31, 14, int(slot[2:])),
+                                        provider="fixture", candidates=[candidate])
+        self.store.rebuild_strict_final_signals("2026-07-31")
+        first = capture_strict_exit_observation(self.store, FakeSource(), datetime(2026, 8, 3, 10, 1))
+        second = capture_strict_exit_observation(self.store, FakeSource(), datetime(2026, 8, 3, 10, 30))
+        self.assertEqual(len(first), 1)
+        self.assertEqual(second, [])
+        self.assertEqual(self.store.strict_exit_observation_frame("2026-08-03").iloc[0]["observed_at"],
+                         "2026-08-03T10:01:00")
+
+    def test_exact_long_holiday_session_is_used_for_validation(self):
+        self.store.freeze_scan(
+            scanned_at=datetime(2026, 2, 13, 14, 52), provider="fixture", market_count=1,
+            hard_count=1, config={}, candidates=[{"code": "600001", "name": "fixture", "price": 10, "score": 80}],
+        )
+        class Source:
+            def minute_recent(self, code):
+                return minute_frame("2026-02-24", 10)
+            def index_minute_recent(self):
+                return minute_frame("2026-02-24", 3800)
+        result = validate_pending(self.store, Source(), datetime(2026, 2, 24, 10, 31), include_history=False)
+        self.assertEqual(result["completed"], 1)
+        self.assertEqual(self.store.validation_frame().iloc[0]["validation_date"], "2026-02-24")
+
+    def test_ordinary_automatic_validation_ignores_old_unverified_signals(self):
+        self.store.freeze_scan(
+            scanned_at=datetime(2026, 7, 31, 14, 52), provider="fixture", market_count=1,
+            hard_count=1, config={}, candidates=[{"code": "600001", "name": "fixture", "price": 10, "score": 80}],
+        )
+        class NoNetwork:
+            def index_minute_recent(self):
+                raise AssertionError("old signal should not fetch")
+        result = validate_pending(self.store, NoNetwork(), datetime(2026, 11, 6, 10, 31), include_history=False)
+        self.assertEqual(result["pending"], 0)
+        self.assertEqual(result["errors"], {})
 
 
 if __name__ == "__main__":

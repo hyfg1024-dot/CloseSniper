@@ -107,7 +107,7 @@ def discover_chat_id(token: str) -> str:
     raise TelegramError("尚未找到聊天。请先向新机器人发送 /start，再点击保存并连接。")
 
 
-def send_message(settings: TelegramSettings, text: str, *, attempts: int = 3) -> None:
+def send_message(settings: TelegramSettings, text: str, *, attempts: int = 3, timeout: float = 20) -> None:
     if not settings.configured:
         raise TelegramError("Telegram尚未完成配置。")
     last_error: TelegramError | None = None
@@ -121,7 +121,7 @@ def send_message(settings: TelegramSettings, text: str, *, attempts: int = 3) ->
                     "text": text,
                     "disable_web_page_preview": True,
                 },
-                timeout=20,
+                timeout=timeout,
             )
             return
         except TelegramError as exc:

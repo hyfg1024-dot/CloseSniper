@@ -1,8 +1,8 @@
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pandas as pd
 
@@ -38,9 +38,182 @@ class _ScanResult:
     provider = "测试行情"
     funnel = {"全市场": 1}
     candidates = pd.DataFrame()
+    raw_spot = pd.DataFrame()
+    result_frame = pd.DataFrame(columns=["passed", "code", "name", "price", "score"])
+    daily_history = {}
+    minute_history = {}
+    concepts = {}
+    errors = {}
+    hard_count = 0
 
 
 class ResilienceTests(unittest.TestCase):
+    def test_no_attempt_budget_and_empty_retry_list_record_failure(self):
+        for delays, expired in (((0, 3), True), ((), False)):
+            with self.subTest(delays=delays), tempfile.TemporaryDirectory() as directory:
+                store = ValidationStore(Path(directory) / "scan.db")
+                now = datetime(2026, 11, 6, 14, 32, 30)
+                with patch.object(auto_scan, "run_with_deadline") as worker:
+                    with self.assertRaises(MarketDataError):
+                        auto_scan.run_scan_with_retries(
+                            cfg=auto_scan.StrategyConfig(), slot="1430", store=store,
+                            now_fn=lambda: now, retry_delays=delays,
+                            deadline_at=now if expired else now + timedelta(seconds=1),
+                        )
+                worker.assert_not_called()
+                status = store.scan_status_frame("2026-11-06").iloc[0]
+                self.assertEqual(status["status"], "failed")
+                self.assertEqual(status["attempt_count"], 0)
+
+    def test_timed_out_retry_does_not_sleep_past_deadline_or_claim_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ValidationStore(Path(directory) / "scan.db")
+            clock = [datetime(2026, 11, 6, 14, 30)]
+            deadline = clock[0] + timedelta(seconds=150)
+            sleep = Mock()
+
+            def slow_result(*_args, **_kwargs):
+                clock[0] = deadline
+                return _ScanResult()
+
+            with patch.object(auto_scan, "run_with_deadline", side_effect=slow_result) as worker:
+                with self.assertRaisesRegex(MarketDataError, "截止"):
+                    auto_scan.run_scan_with_retries(
+                        cfg=auto_scan.StrategyConfig(), slot="1430", store=store,
+                        now_fn=lambda: clock[0], retry_delays=(0, 3), sleep_fn=sleep,
+                        deadline_at=deadline,
+                    )
+            self.assertEqual(worker.call_count, 1)
+            sleep.assert_not_called()
+            status = store.scan_status_frame("2026-11-06").iloc[0]
+            self.assertEqual(status["status"], "failed")
+            self.assertEqual(status["attempt_count"], 1)
+            self.assertTrue(store.strict_frame("2026-11-06").empty)
+
+    def test_early_slot_uses_absolute_budget_after_init_and_retries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ValidationStore(Path(directory) / "scan.db")
+            clock = [datetime(2026, 11, 6, 14, 30, 10)]
+            budgets = []
+
+            def worker(*_args, **kwargs):
+                budgets.append(kwargs["timeout_seconds"])
+                self.assertTrue(kwargs["kwargs"]["analyze_all"])
+                if len(budgets) == 1:
+                    clock[0] += timedelta(seconds=2)
+                    raise MarketDataError("transient")
+                return _ScanResult()
+
+            def sleep(seconds):
+                clock[0] += timedelta(seconds=seconds)
+
+            # Call the retry layer directly so its clock and sleep are fully
+            # controlled without touching the production provider or Telegram.
+            with patch.object(auto_scan, "run_with_deadline", side_effect=worker):
+                auto_scan.run_scan_with_retries(
+                    cfg=auto_scan.StrategyConfig(), slot="1430", store=store,
+                    now_fn=lambda: clock[0], sleep_fn=sleep, retry_delays=(0, 3),
+                    deadline_at=datetime(2026, 11, 6, 14, 32, 30), analyze_all=True,
+                )
+            self.assertEqual(budgets, [140, 135])
+
+    def test_automatic_early_partial_data_is_failed_not_empty_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ValidationStore(Path(directory) / "scan.db")
+            result = _ScanResult()
+            result.errors = {"600001": "missing minute"}
+            with patch.object(auto_scan, "run_with_deadline", return_value=result):
+                with self.assertRaisesRegex(MarketDataError, "600001"):
+                    auto_scan.run_scan_with_retries(
+                        cfg=auto_scan.StrategyConfig(), slot="1430", store=store,
+                        now_fn=lambda: datetime(2026, 11, 6, 14, 30), retry_delays=(0,),
+                        deadline_at=datetime(2026, 11, 6, 14, 32, 30), require_complete=True,
+                    )
+            self.assertEqual(store.scan_status_frame("2026-11-06").iloc[0]["status"], "failed")
+            self.assertTrue(store.strict_frame("2026-11-06").empty)
+
+    def test_early_call_is_harmless_and_late_call_is_explicit_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ValidationStore(Path(directory) / "scan.db")
+            with patch.object(auto_scan, "run_scan_with_retries") as scan:
+                response = auto_scan.run_regular_slot(
+                    slot="1430", cfg=auto_scan.StrategyConfig(), store=store,
+                    now_fn=lambda: datetime(2026, 11, 6, 14, 29, 59),
+                )
+                self.assertEqual(response["status"], "skipped")
+                self.assertTrue(store.scan_status_frame("2026-11-06").empty)
+                with self.assertRaises(MarketDataError):
+                    auto_scan.run_regular_slot(
+                        slot="1430", cfg=auto_scan.StrategyConfig(), store=store,
+                        now_fn=lambda: datetime(2026, 11, 6, 14, 32, 30),
+                    )
+                scan.assert_not_called()
+            self.assertEqual(store.scan_status_frame("2026-11-06").iloc[0]["status"], "failed")
+
+    def test_early_cache_failure_invalidates_previously_successful_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ValidationStore(Path(directory) / "scan.db")
+            at = datetime(2026, 11, 6, 14, 30, 10)
+            with patch.object(auto_scan, "run_with_deadline", return_value=_ScanResult()), \
+                    patch.object(auto_scan, "derive_strict_frame", return_value=_ScanResult.result_frame), \
+                    patch.object(auto_scan, "cache_scan", side_effect=OSError("disk failure")):
+                with self.assertRaisesRegex(MarketDataError, "disk failure"):
+                    auto_scan.run_regular_slot(slot="1430", cfg=auto_scan.StrategyConfig(), store=store,
+                                               now_fn=lambda: at)
+            self.assertEqual(store.scan_status_frame("2026-11-06").iloc[0]["status"], "failed")
+            self.assertTrue(store.strict_frame("2026-11-06").empty)
+
+    def test_holiday_main_skips_without_database_or_network(self):
+        with patch("sys.argv", ["auto_scan.py", "--slot", "1452"]), \
+                patch.object(auto_scan, "datetime") as clock, \
+                patch.object(auto_scan, "ValidationStore") as store, \
+                patch.object(auto_scan, "run_strict_final") as scanner:
+            clock.now.return_value = datetime(2026, 10, 1, 14, 52)
+            auto_scan.main()
+        store.assert_not_called()
+        scanner.assert_not_called()
+
+    def test_busy_node_lock_is_nonblocking_and_skips_without_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("sys.argv", ["auto_scan.py", "--slot", "1452"]), \
+                    patch.object(auto_scan, "datetime") as clock, \
+                    patch.object(auto_scan, "Path", return_value=Path(directory) / "test.lock") as path, \
+                    patch.object(auto_scan.fcntl, "flock", side_effect=BlockingIOError) as flock, \
+                    patch.object(auto_scan, "ValidationStore") as store:
+                clock.now.return_value = datetime(2026, 11, 6, 14, 52)
+                auto_scan.main()
+            store.assert_not_called()
+            path.assert_called_with("data/auto-scan-1452.lock")
+            self.assertTrue(flock.call_args.args[1] & auto_scan.fcntl.LOCK_NB)
+
+    def test_main_initialization_does_not_extend_final_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ValidationStore(Path(directory) / "scan.db")
+            at = [datetime(2026, 11, 6, 14, 52)]
+
+            def delayed_initialization(**_kwargs):
+                at[0] = datetime(2026, 11, 6, 14, 52, 41)
+                return store
+
+            with patch("sys.argv", ["auto_scan.py", "--slot", "1452"]), \
+                    patch.object(auto_scan, "datetime") as clock, \
+                    patch.object(auto_scan, "Path", return_value=Path(directory) / "test.lock"), \
+                    patch.object(auto_scan, "ValidationStore", side_effect=delayed_initialization), \
+                    patch("src.strict_schedule.publish_decision", return_value="disabled"), \
+                    patch("src.strict_schedule.prepared_inputs") as prepare:
+                clock.now.side_effect = lambda: at[0]
+                auto_scan.main()
+            prepare.assert_not_called()
+            self.assertEqual(store.scan_status_frame("2026-11-06").iloc[0]["status"], "failed")
+
+    def test_main_before_planned_time_skips_without_initialization(self):
+        with patch("sys.argv", ["auto_scan.py", "--slot", "1452"]), \
+                patch.object(auto_scan, "datetime") as clock, \
+                patch.object(auto_scan, "ValidationStore") as store:
+            clock.now.return_value = datetime(2026, 11, 6, 14, 51, 59)
+            auto_scan.main()
+        store.assert_not_called()
+
     def test_frozen_candidate_scan_reuses_1445_analysis_and_updates_live_fields(self) -> None:
         raw = pd.DataFrame([{
             "代码": "600001", "名称": "测试股份", "最新价": 10.4,

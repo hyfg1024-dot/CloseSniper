@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+import json
 import math
+import re
 import time
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -13,6 +15,99 @@ import requests
 
 class MarketDataError(RuntimeError):
     pass
+
+
+def _request_json(url: str, params: dict, validate: Callable = lambda value: value) -> Any:
+    """Bounded read-only requests; malformed/incomplete pages get one retry too."""
+    last_error = None
+    for attempt in range(2):
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            response = session.get(url, params=params, timeout=(3, 8))
+            response.raise_for_status()
+            return validate(response.json())
+        except (requests.RequestException, ValueError, KeyError, TypeError, MarketDataError) as exc:
+            last_error = exc
+            if attempt == 0:
+                time.sleep(0.2)
+        finally:
+            if hasattr(session, "close"):
+                session.close()
+    raise MarketDataError(f"行情请求失败（已尝试2次）：{last_error}")
+
+
+def _positive_total(value: Any, provider: str) -> int:
+    try:
+        total = int(value)
+    except (TypeError, ValueError) as exc:
+        raise MarketDataError(f"{provider}缺少有效的全市场总数") from exc
+    if isinstance(value, bool) or str(total) != str(value) or not 0 < total < 100_000:
+        raise MarketDataError(f"{provider}全市场总数无效")
+    return total
+
+
+def _checked_rows(rows: Any, expected: int, required: set[str], provider: str) -> list[dict]:
+    if not isinstance(rows, list) or len(rows) != expected:
+        count = len(rows) if isinstance(rows, list) else "格式错误"
+        raise MarketDataError(f"{provider}分页不完整：应有{expected}条，实际{count}")
+    if any(not isinstance(row, dict) or not required.issubset(row) for row in rows):
+        raise MarketDataError(f"{provider}分页缺少必要字段")
+    return rows
+
+
+def _complete_universe(frame: pd.DataFrame, total: int, provider: str, universe: str) -> pd.DataFrame:
+    if frame.empty or len(frame) != total or "代码" not in frame:
+        raise MarketDataError(f"{provider}全市场数据不完整：{len(frame)}/{total}")
+    codes = frame["代码"].astype(str)
+    if not codes.str.fullmatch(r"\d{6}").all() or codes.duplicated().any():
+        raise MarketDataError(f"{provider}全市场代码重复或格式错误，不能以去重掩盖缺页")
+    frame.attrs.update({"provider": provider, "expected_count": total, "received_count": len(frame),
+                        "completeness": "provider_count_verified", "universe": universe,
+                        "volume_unit": "shares"})
+    return frame
+
+
+def _verified_volume_multiplier(volume: float, amount: float, low: float, high: float) -> float:
+    """Resolve raw shares versus lots from this response's own cash/price bounds.
+
+    Verified 2026-11-06: raw Tencent daily/quote volumes are lots for 000001,
+    002779, 300001, 600000, but shares for 688001/688256. Do not infer from
+    code prefixes or AKShare versions. 2% tolerance covers rounded cash fields;
+    it cannot confuse the 100-fold alternatives. Ambiguous units fail closed.
+    """
+    if not all(math.isfinite(value) for value in (volume, amount, low, high)):
+        raise MarketDataError("成交量单位无法核验：量额或高低价缺失")
+    if volume <= 0 or amount <= 0 or not 0 < low <= high:
+        raise MarketDataError("成交量单位无法核验：量额或价格无效")
+    matches = [factor for factor in (1.0, 100.0)
+               if low * 0.98 <= amount / (volume * factor) <= high * 1.02]
+    if len(matches) != 1:
+        raise MarketDataError("成交量单位无法核验：成交均价不在当日高低价范围")
+    return matches[0]
+
+
+def _parse_sina_minutes(text: str) -> pd.DataFrame:
+    """Decode the known Sina assignment wrapper, never execute JavaScript."""
+    match = re.fullmatch(
+        r"\s*(?:/\*.*?\*/\s*)?(?:(?:var\s+)?[A-Za-z_$][\w$]*\s*)?=\s*\((.*)\)\s*;\s*",
+        text, flags=re.DOTALL,
+    )
+    if match is None:
+        raise MarketDataError("新浪分钟线JSONP包装格式异常")
+    try:
+        rows = json.loads(match.group(1))
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise MarketDataError("新浪分钟线JSON内容无效") from exc
+    fields = ["day", "open", "high", "low", "close", "volume", "amount"]
+    if not isinstance(rows, list) or not rows:
+        raise MarketDataError("新浪分钟线为空或不是记录列表")
+    if any(not isinstance(row, dict) or not set(fields).issubset(row) for row in rows):
+        raise MarketDataError("新浪分钟线字段不完整")
+    # Date, OHLC and complete-session checks remain in validation_service.
+    frame = pd.DataFrame(rows)[fields]
+    frame.attrs.update({"provider": "新浪未复权分钟线（直读）", "price_adjustment": "none"})
+    return frame
 
 
 class AkshareSource:
@@ -44,9 +139,7 @@ class AkshareSource:
             return self._sina_spot()
         except Exception as sina_exc:
             try:
-                frame = self.ak.stock_zh_a_spot_em()
-                frame.attrs["provider"] = "东方财富"
-                return frame
+                return self._eastmoney_spot()
             except Exception as em_exc:
                 try:
                     return self._tencent_spot()
@@ -58,11 +151,16 @@ class AkshareSource:
 
     @staticmethod
     def _tencent_spot() -> pd.DataFrame:
-        """读取腾讯沪深京全市场快照；每一页独立重试，避免单页断线拖垮整批。"""
+        """Verify every page against provider total; never silently deduplicate.
+
+        Live probing on 2026-11-06 rejected sort_type=code. Price ordering may
+        move during pagination, so duplicate/missing rows invalidate the batch.
+        """
         url = "https://proxy.finance.qq.com/cgi/cgi-bin/rank/hs/getBoardRankList"
         page_size = 200
+        required = {"code", "name", "zxj", "zdf", "lb", "hsl", "ltsz", "volume", "turnover"}
 
-        def fetch_page(offset: int) -> dict:
+        def fetch_page(offset: int, expected_total: int | None = None) -> dict:
             params = {
                 "_appver": "11.17.0",
                 "board_code": "aStock",
@@ -71,35 +169,24 @@ class AkshareSource:
                 "offset": str(offset),
                 "count": str(page_size),
             }
-            last_error: Exception | None = None
-            for attempt in range(3):
-                try:
-                    session = requests.Session()
-                    response = session.get(url, params=params, timeout=20)
-                    response.raise_for_status()
-                    payload = response.json()
-                    if "data" not in payload or "rank_list" not in payload["data"]:
-                        raise MarketDataError("腾讯行情返回格式异常")
-                    return payload["data"]
-                except Exception as exc:
-                    last_error = exc
-                    if attempt < 2:
-                        time.sleep(0.8 * (attempt + 1))
-            raise MarketDataError(f"腾讯行情第{offset // page_size + 1}页失败：{last_error}")
+            def validate(payload):
+                data = payload["data"]
+                page_total = _positive_total(data["total"], "腾讯")
+                if expected_total is not None and page_total != expected_total:
+                    raise MarketDataError("腾讯分页过程中全市场总数变化")
+                _checked_rows(data["rank_list"], min(page_size, page_total - offset), required, "腾讯")
+                return data
+            return _request_json(url, params, validate)
 
         first = fetch_page(0)
-        total = int(first.get("total", 0))
-        if total <= 0:
-            raise MarketDataError("腾讯实时行情返回空数据")
+        total = _positive_total(first.get("total"), "腾讯")
         rows = list(first["rank_list"])
         offsets = [page * page_size for page in range(1, math.ceil(total / page_size))]
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(fetch_page, offset) for offset in offsets]
+            futures = [pool.submit(fetch_page, offset, total) for offset in offsets]
             for future in as_completed(futures):
                 rows.extend(future.result()["rank_list"])
-        raw = pd.DataFrame(rows).drop_duplicates(subset=["code"], ignore_index=True)
-        if len(raw) < total:
-            raise MarketDataError(f"腾讯实时行情不完整：仅取得{len(raw)}/{total}只")
+        raw = pd.DataFrame(rows)
 
         number = lambda name: pd.to_numeric(raw[name], errors="coerce")
         price = number("zxj")
@@ -125,8 +212,8 @@ class AkshareSource:
                 "昨收": previous,
             }
         )
-        frame.attrs["provider"] = "腾讯财经"
-        return frame
+        frame.attrs["pagination_order"] = "price; unique provider count checked"
+        return _complete_universe(frame, total, "腾讯财经", "腾讯aStock（沪深京A股）")
 
     def fast_spot(self, codes: list[str], *, timeout: float = 5.0) -> pd.DataFrame:
         """一次请求读取候选池报价，供14:52冻结版做增量确认。"""
@@ -155,6 +242,12 @@ class AkshareSource:
 
             price = number(3)
             previous = number(4)
+            raw_volume = number(36)
+            amount = number(57) * 10_000
+            if raw_volume == 0 and amount == 0:
+                shares = 0.0
+            else:
+                shares = raw_volume * _verified_volume_multiplier(raw_volume, amount, number(34), number(33))
             rows.append({
                 "代码": str(payload[2]).zfill(6),
                 "名称": payload[1],
@@ -163,8 +256,8 @@ class AkshareSource:
                 "量比": number(49),
                 "换手率": number(38),
                 "流通市值": number(45) * 1e8,
-                "成交量": number(36) * 100,
-                "成交额": number(57) * 10_000,
+                "成交量": shares,
+                "成交额": amount,
                 "最高": number(33),
                 "最低": number(34),
                 "今开": number(5),
@@ -176,7 +269,10 @@ class AkshareSource:
         missing = sorted(set(str(code).zfill(6) for code in codes) - received)
         if missing:
             raise MarketDataError(f"腾讯候选报价不完整，缺少：{', '.join(missing)}")
+        if frame["代码"].duplicated().any() or received != set(str(code).zfill(6) for code in codes):
+            raise MarketDataError("腾讯候选报价包含重复或额外股票")
         frame.attrs["provider"] = "腾讯候选池增量报价"
+        frame.attrs["volume_unit"] = "shares"
         return frame
 
     def fast_index_return(self, *, timeout: float = 5.0) -> tuple[float, str]:
@@ -202,11 +298,10 @@ class AkshareSource:
             "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
             "Market_Center.getHQNodeData"
         )
-        session = requests.Session()
-        count_response = session.get(count_url, params={"node": "hs_a"}, timeout=12)
-        count_response.raise_for_status()
-        total = int(count_response.json())
+        total = _request_json(count_url, {"node": "hs_a"}, lambda value: _positive_total(value, "新浪"))
         pages = (total + 99) // 100
+        required = {"code", "name", "trade", "changepercent", "turnoverratio", "nmc",
+                    "volume", "amount", "high", "low", "open", "settlement"}
 
         def fetch_page(page: int) -> list[dict]:
             params = {
@@ -218,18 +313,17 @@ class AkshareSource:
                 "symbol": "",
                 "_s_r_a": "page",
             }
-            local_session = requests.Session()
-            response = local_session.get(data_url, params=params, timeout=15)
-            response.raise_for_status()
-            return response.json()
+            expected = min(100, total - (page - 1) * 100)
+            return _request_json(data_url, params, lambda rows: _checked_rows(rows, expected, required, "新浪"))
 
         rows: list[dict] = []
         with ThreadPoolExecutor(max_workers=4) as pool:
             futures = [pool.submit(fetch_page, page) for page in range(1, pages + 1)]
             for future in as_completed(futures):
                 rows.extend(future.result())
-        if not rows:
-            raise MarketDataError("新浪实时行情返回空数据")
+        final_total = _request_json(count_url, {"node": "hs_a"}, lambda value: _positive_total(value, "新浪"))
+        if final_total != total:
+            raise MarketDataError("新浪分页过程中全市场总数变化")
 
         raw = pd.DataFrame(rows)
         number = lambda name: pd.to_numeric(raw[name], errors="coerce")
@@ -251,29 +345,109 @@ class AkshareSource:
                 "昨收": number("settlement"),
             }
         )
-        frame.attrs["provider"] = "新浪财经 + 腾讯日线"
-        return frame
+        frame.attrs["pagination_order"] = "symbol ascending"
+        return _complete_universe(frame, total, "新浪财经 + 腾讯日线", "新浪hs_a（按接口总数核对）")
+
+    @staticmethod
+    def _eastmoney_spot() -> pd.DataFrame:
+        """Read server totals directly: the AKShare dataframe drops that evidence."""
+        url = "https://82.push2.eastmoney.com/api/qt/clist/get"
+        mapping = {"f12": "代码", "f14": "名称", "f2": "最新价", "f3": "涨跌幅",
+                   "f10": "量比", "f8": "换手率", "f21": "流通市值", "f5": "成交量",
+                   "f6": "成交额", "f15": "最高", "f16": "最低", "f17": "今开", "f18": "昨收"}
+
+        def fetch_page(page, expected_total=None):
+            params = {"pn": str(page), "pz": "100", "po": "1", "np": "1", "fltt": "2", "invt": "2",
+                      "fid": "f12", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+                      "fields": ",".join(mapping)}
+            def validate(payload):
+                data = payload["data"]
+                total = _positive_total(data["total"], "东方财富")
+                if expected_total is not None and total != expected_total:
+                    raise MarketDataError("东方财富分页过程中全市场总数变化")
+                rows = data["diff"]
+                if isinstance(rows, dict):
+                    rows = list(rows.values())
+                return total, _checked_rows(rows, min(100, total - (page - 1) * 100), set(mapping), "东方财富")
+            return _request_json(url, params, validate)
+
+        total, rows = fetch_page(1)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(fetch_page, page, total) for page in range(2, math.ceil(total / 100) + 1)]
+            for future in as_completed(futures):
+                rows.extend(future.result()[1])
+        frame = pd.DataFrame(rows).rename(columns=mapping)[list(mapping.values())]
+        frame["代码"] = frame["代码"].astype(str).str.zfill(6)
+        for column in set(mapping.values()) - {"代码", "名称"}:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        # f5 and stock_zh_a_hist 成交量 are lots; checked against cash/price on
+        # 600000, 2026-11-06: 642707 lots, 640470012 yuan, range 9.84–10.07.
+        frame["成交量"] *= 100
+        frame.attrs["pagination_order"] = "f12 code"
+        return _complete_universe(frame, total, "东方财富", "东财沪深京A股查询fs（按接口总数核对）")
 
     def daily(self, code: str) -> pd.DataFrame:
         end = datetime.now().strftime("%Y%m%d")
         start = (datetime.now() - timedelta(days=150)).strftime("%Y%m%d")
         symbol = self._market_symbol(code)
         try:
-            return self.ak.stock_zh_a_hist_tx(
-                symbol=symbol,
-                start_date=start,
-                end_date=end,
-                adjust="qfq",
-                timeout=15,
-            )
-        except Exception:
-            return self.ak.stock_zh_a_hist(
+            # Control raw units here, independent of incompatible AKShare
+            # versions (the installed adapter misclassified sz000 as an index).
+            params = {"param": f"{symbol},day,{start[:4]}-{start[4:6]}-{start[6:]},{end[:4]}-{end[4:6]}-{end[6:]},180,qfq"}
+            payload = _request_json("https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get", params)
+            block = payload["data"][symbol]
+            rows = block.get("qfqday", block.get("day"))
+            if not isinstance(rows, list) or not rows or any(not isinstance(row, list) or len(row) < 9 for row in rows):
+                raise MarketDataError("腾讯日线字段不完整，无法验证成交量单位")
+            frame = pd.DataFrame([row[:6] + [row[8]] for row in rows],
+                                 columns=["date", "open", "close", "high", "low", "volume", "amount"])
+            for column in frame.columns.difference(["date"]):
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+            frame["amount"] *= 10_000
+            traded = frame[(frame["volume"] > 0) & (frame["amount"] > 0)]
+            if traded.empty:
+                raise MarketDataError("腾讯日线没有可验证成交量单位的交易日")
+            latest = traded.iloc[-1]
+            multiplier = _verified_volume_multiplier(latest["volume"], latest["amount"], latest["low"], latest["high"])
+            frame["volume"] *= multiplier
+            return self._validated_daily(frame, "腾讯前复权日线", start, end)
+        except (requests.RequestException, MarketDataError, ValueError, KeyError, TypeError) as tx_exc:
+            raw = self.ak.stock_zh_a_hist(
                 symbol=code,
                 period="daily",
                 start_date=start,
                 end_date=end,
                 adjust="qfq",
+                timeout=8,
             )
+            if raw is None or raw.empty or not {"日期", "开盘", "收盘", "最高", "最低", "成交量"}.issubset(raw.columns):
+                raise MarketDataError(f"腾讯日线失败且东财日线不完整：{tx_exc}")
+            frame = raw.rename(columns={"日期": "date", "开盘": "open", "收盘": "close",
+                                        "最高": "high", "最低": "low", "成交量": "volume", "成交额": "amount"}).copy()
+            frame["volume"] = pd.to_numeric(frame["volume"], errors="coerce") * 100
+            return self._validated_daily(frame, "东方财富前复权日线", start, end)
+
+    @staticmethod
+    def _validated_daily(frame, provider, start, end):
+        frame = frame.copy()
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+        if frame["date"].isna().any() or frame["date"].duplicated().any():
+            raise MarketDataError(f"{provider}日线日期缺失或重复")
+        fields = ["open", "close", "high", "low", "volume"]
+        for column in fields:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        if not np.isfinite(frame[fields].to_numpy()).all() or (frame["volume"] < 0).any():
+            raise MarketDataError(f"{provider}日线价格或成交量缺失/无效")
+        if (frame[["open", "close", "high", "low"]] <= 0).any().any():
+            raise MarketDataError(f"{provider}日线含非正价格")
+        if ((frame["high"] < frame[["open", "close", "low"]].max(axis=1))
+                | (frame["low"] > frame[["open", "close", "high"]].min(axis=1))).any():
+            raise MarketDataError(f"{provider}日线高低价范围矛盾")
+        frame = frame[frame["date"].between(pd.Timestamp(start), pd.Timestamp(end))].sort_values("date").reset_index(drop=True)
+        if frame.empty:
+            raise MarketDataError(f"{provider}指定区间无日线")
+        frame.attrs.update({"provider": provider, "volume_unit": "shares", "price_adjustment": "qfq"})
+        return frame
 
     def minute(self, code: str) -> pd.DataFrame:
         frame = self.minute_recent(code)
@@ -295,7 +469,7 @@ class AkshareSource:
     def minute_recent(self, code: str) -> pd.DataFrame:
         symbol = self._market_symbol(code)
         try:
-            return self.ak.stock_zh_a_minute(symbol=symbol, period="1", adjust="")
+            return self._sina_minutes(symbol)
         except Exception:
             day = datetime.now().strftime("%Y-%m-%d")
             return self.ak.stock_zh_a_hist_min_em(
@@ -305,6 +479,27 @@ class AkshareSource:
                 period="1",
                 adjust="",
             )
+
+    @staticmethod
+    def _sina_minutes(symbol: str) -> pd.DataFrame:
+        """Same unadjusted Sina endpoint as AKShare, without its unused daily fetch.
+
+        AKShare's stock_zh_a_minute calls stock_zh_a_daily before checking
+        adjust='', adding an unrelated unbounded request to every validation.
+        """
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            response = session.get(
+                "https://quotes.sina.cn/cn/api/jsonp_v2.php/=/CN_MarketDataService.getKLineData",
+                params={"symbol": symbol, "scale": "1", "ma": "no", "datalen": "1970"},
+                timeout=(3, 8),
+            )
+            response.raise_for_status()
+            return _parse_sina_minutes(response.text)
+        finally:
+            if hasattr(session, "close"):
+                session.close()
 
     def minute_for_date(self, code: str, trade_date: str) -> pd.DataFrame:
         """读取指定交易日的一分钟线，供历史校验补算使用。"""
@@ -342,7 +537,7 @@ class AkshareSource:
 
     def index_minute_recent(self) -> pd.DataFrame:
         try:
-            return self.ak.stock_zh_a_minute(symbol="sh000001", period="1", adjust="")
+            return self._sina_minutes("sh000001")
         except Exception:
             day = datetime.now().strftime("%Y-%m-%d")
             return self.ak.index_zh_a_hist_min_em(

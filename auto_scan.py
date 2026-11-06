@@ -5,7 +5,7 @@ import argparse
 import fcntl
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -27,6 +27,9 @@ from src.telegram_service import (
     send_message,
 )
 from src.validation_store import ValidationStore
+from src.deadline_worker import run_with_deadline
+from src.strict_schedule import cache_scan, decision_record, run_strict_final
+from src.trading_calendar import CalendarUnavailable, is_trading_day
 
 
 RETRY_DELAYS_SECONDS = (0, 20, 40, 60)
@@ -44,12 +47,22 @@ def run_scan_with_retries(
     prefer_tencent: bool = False,
     record_status: bool = True,
     cutoff_at: datetime | None = None,
+    deadline_at: datetime | None = None,
+    fast_minutes: bool = False,
+    analyze_all: bool = False,
+    require_complete: bool = False,
 ) -> tuple[ScanResult, datetime, int]:
     errors: list[str] = []
+    attempts = 0
+    attempted_at = now_fn()
     for attempt, delay in enumerate(retry_delays, 1):
+        if deadline_at is not None and (deadline_at - now_fn()).total_seconds() <= delay:
+            errors.append("已到采样截止时间，未开始迟到重试")
+            break
         if delay:
             sleep_fn(delay)
         attempted_at = now_fn()
+        attempts = attempt
         if record_status:
             store.record_scan_run(
                 slot=slot,
@@ -58,11 +71,27 @@ def run_scan_with_retries(
                 attempt_count=attempt,
             )
         try:
-            result = run_market_scan(
-                cfg, mode="rational", now=attempted_at,
-                restrict_codes=restrict_codes, prefer_tencent=prefer_tencent,
-                cutoff_at=cutoff_at,
-            )
+            scan_kwargs = dict(mode="rational", now=attempted_at,
+                               restrict_codes=restrict_codes, prefer_tencent=prefer_tencent,
+                               cutoff_at=cutoff_at, fast_minutes=fast_minutes,
+                               analyze_all=analyze_all)
+            if deadline_at is None:
+                result = run_market_scan(cfg, **scan_kwargs)
+            else:
+                remaining = (deadline_at - now_fn()).total_seconds()
+                if remaining <= 0:
+                    raise MarketDataError("初始化或状态保存已耗尽采样预算")
+                result = run_with_deadline(
+                    run_market_scan, args=(cfg,), kwargs=scan_kwargs,
+                    timeout_seconds=remaining,
+                )
+            completed_at = now_fn()
+            if deadline_at is not None and completed_at >= deadline_at:
+                raise MarketDataError("采样计算超过截止时间，未接受迟到结果")
+            if require_complete and getattr(result, "errors", {}):
+                raise MarketDataError("部分个股数据不完整：" + "; ".join(
+                    f"{code}: {error}" for code, error in result.errors.items()
+                ))
         except Exception as exc:
             message = str(exc)
             errors.append(message)
@@ -76,7 +105,6 @@ def run_scan_with_retries(
                     error_message=message,
                 )
             continue
-        completed_at = now_fn()
         if record_status:
             store.record_scan_run(
                 slot=slot,
@@ -93,8 +121,11 @@ def run_scan_with_retries(
                 ),
             )
         return result, completed_at, attempt
-    last_error = errors[-1] if errors else "未知行情错误"
-    raise MarketDataError(f"已自动尝试{len(retry_delays)}次仍失败：{last_error}")
+    last_error = errors[-1] if errors else "未配置有效扫描尝试"
+    if record_status:
+        store.record_scan_run(slot=slot, attempted_at=attempted_at, status="failed", attempt_count=attempts,
+                              completed_at=now_fn(), error_message=last_error)
+    raise MarketDataError(f"已自动尝试{attempts}次仍失败：{last_error}")
 
 
 def notify_scan_issue(
@@ -138,10 +169,13 @@ def send_once(
     if store.notification_sent(trade_date, channel):
         return "already_sent"
     try:
-        send_message(settings, message)
-        store.mark_notification_sent(trade_date, channel, sent_at)
+        run_with_deadline(send_message, args=(settings, message),
+                          kwargs={"attempts": 1, "timeout": 3}, timeout_seconds=5)
+        # The timestamp is API acknowledgement, not the earlier scan timestamp
+        # and not a claim that the user has already received/read the message.
+        store.mark_notification_sent(trade_date, channel, datetime.now())
         return "sent"
-    except TelegramError:
+    except Exception:
         return "failed"
 
 
@@ -150,26 +184,62 @@ def run_regular_slot(
     slot: str,
     cfg: StrategyConfig,
     store: ValidationStore,
+    now_fn: Callable[[], datetime] = datetime.now,
 ) -> dict:
+    started = now_fn()
+    planned = started.replace(hour=14, minute=int(slot[2:]), second=0, microsecond=0)
+    deadline = planned + timedelta(seconds=150)
+    if started < planned:
+        return {"status": "skipped", "reason": "尚未到采样时间，未修改当天记录"}
+    if decision_record(store, started.date().isoformat()):
+        return {"status": "skipped", "reason": "当天决策已冻结，未修改采样记录"}
+    if started >= deadline:
+        store.record_scan_run(slot=slot, attempted_at=started, status="failed", attempt_count=0,
+                              completed_at=started, error_message="错过采样窗口，未用迟到行情补写原始快照")
+        raise MarketDataError("错过采样窗口，未用迟到行情补写原始快照")
     result, scan_now, attempt_count = run_scan_with_retries(
-        cfg=cfg, slot=slot, store=store,
+        cfg=cfg, slot=slot, store=store, retry_delays=(0, 3), deadline_at=deadline, fast_minutes=True,
+        now_fn=now_fn, analyze_all=True, require_complete=True,
     )
-    candidates = result.candidates.to_dict("records")
-    strict_frame = derive_strict_frame(result.result_frame)
-    strict_candidates = strict_frame[strict_frame["passed"] == True].to_dict("records")  # noqa: E712
-    store.save_strict_scan(
-        slot=slot, scanned_at=scan_now, provider=result.provider,
-        candidates=strict_candidates,
-    )
-    store.save_staged_scan(
-        slot=slot, scanned_at=scan_now, provider=result.provider,
-        market_count=result.funnel["全市场"], hard_count=result.hard_count,
-        config=cfg.as_dict(), candidates=candidates,
-    )
+    try:
+        if scan_now >= deadline or now_fn() >= deadline:
+            raise MarketDataError("采样计算超时，未写入迟到快照")
+        candidates = result.candidates.to_dict("records")
+        strict_frame = derive_strict_frame(result.result_frame)
+        strict_candidates = strict_frame[strict_frame["passed"] == True].to_dict("records")  # noqa: E712
+        # Cache/evidence must be durable before snapshots can qualify for the
+        # official final. A failed or late write invalidates this slot below.
+        cache_scan(store, slot, result, cfg, scan_now)
+        if now_fn() >= deadline:
+            raise MarketDataError("预备数据保存超时，未写入迟到快照")
+        store.save_strict_scan(
+            slot=slot, scanned_at=scan_now, provider=result.provider,
+            candidates=strict_candidates,
+        )
+        store.save_staged_scan(
+            slot=slot, scanned_at=scan_now, provider=result.provider,
+            market_count=result.funnel["全市场"], hard_count=result.hard_count,
+            config=cfg.as_dict(), candidates=candidates,
+        )
+        if now_fn() >= deadline:
+            raise MarketDataError("快照保存超时，本节点不能用于准时终判")
+    except Exception as exc:
+        store.record_scan_run(slot=slot, attempted_at=started, status="failed", attempt_count=attempt_count,
+                              completed_at=now_fn(), error_message=str(exc)[:500])
+        raise MarketDataError(str(exc)) from exc
     telegram = "not_due"
     if slot == "1445":
         watchlist = store.strict_two_stage_frame(scan_now.date().isoformat())
-        analyses = analyze_watchlist(watchlist, strict_frame.to_dict("records"))
+        remaining = (deadline - now_fn()).total_seconds() - 8
+        analyses = {}
+        if remaining > 0 and not watchlist.empty:
+            try:
+                analyses = run_with_deadline(
+                    analyze_watchlist, args=(watchlist, strict_frame.to_dict("records")),
+                    timeout_seconds=min(15, remaining),
+                )
+            except Exception:
+                pass  # Optional AI never invalidates a complete strict sample.
         store.save_ai_observations(scan_now.date().isoformat(), watchlist, analyses)
         telegram = send_once(
             store=store,
@@ -182,7 +252,7 @@ def run_regular_slot(
                 generated_at=scan_now,
             ),
             sent_at=scan_now,
-        )
+        ) if (deadline - now_fn()).total_seconds() >= 8 else "skipped_time_budget"
     return {
         "status": "ok", "slot": slot, "rational": len(candidates),
         "strict": len(strict_candidates), "attempts": attempt_count,
@@ -293,6 +363,7 @@ def run_full_review(
     try:
         result, completed_at, attempts = run_scan_with_retries(
             cfg=cfg, slot="1452", store=store, record_status=False,
+            retry_delays=(0, 5), deadline_at=started_at + timedelta(minutes=5),
         )
     except MarketDataError as exc:
         store.record_review_run(
@@ -314,25 +385,10 @@ def run_full_review(
             if result.errors else None
         ),
     )
-    store.save_strict_scan(
-        slot="1452", scanned_at=completed_at, provider=result.provider,
-        candidates=strict,
-    )
-    strict_three_stage = store.rebuild_strict_final_signals(trade_date)
-    telegram = send_once(
-        store=store, trade_date=trade_date, channel="telegram-review",
-        message=format_review_message(
-            trade_date=trade_date,
-            strict_candidates=store.review_frame(trade_date, "strict"),
-            improved_candidates=store.review_frame(trade_date, "improved"),
-            generated_at=completed_at,
-        ),
-        sent_at=completed_at,
-    )
     return {
-        "status": "ok", "strict": len(strict), "strict_three_stage": strict_three_stage,
+        "status": "ok", "strict": len(strict),
         "improved": len(improved),
-        "attempts": attempts, "telegram": telegram,
+        "attempts": attempts, "telegram": "archive_only",
         "completed_at": completed_at.isoformat(timespec="seconds"),
     }
 
@@ -342,6 +398,7 @@ def main() -> None:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--slot", choices=("1430", "1445", "1452"))
     group.add_argument("--healthcheck", action="store_true")
+    group.add_argument("--review", action="store_true")
     args = parser.parse_args()
     if args.healthcheck:
         store = ValidationStore()
@@ -353,41 +410,37 @@ def main() -> None:
         }, ensure_ascii=False))
         return
     now = datetime.now()
-    if now.weekday() >= 5:
-        print(json.dumps({"status": "skipped", "reason": "weekend"}, ensure_ascii=False))
+    try:
+        trading_day = is_trading_day(now.date())
+    except CalendarUnavailable as exc:
+        print(json.dumps({"status": "failed", "reason": str(exc)}, ensure_ascii=False))
+        return
+    if not trading_day:
+        print(json.dumps({"status": "skipped", "reason": "交易所休市日"}, ensure_ascii=False))
+        return
+    if args.slot and now < now.replace(hour=14, minute=int(args.slot[2:]), second=0, microsecond=0):
+        print(json.dumps({"status": "skipped", "reason": "尚未到采样时间，未修改当天记录"}, ensure_ascii=False))
         return
 
-    lock_path = Path("data/auto-scan.lock")
+    # Independent locks: a slow 14:45 scan or archival review never queues 14:52.
+    lock_path = Path(f"data/auto-scan-{args.slot or 'review'}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(json.dumps({"status": "skipped", "reason": "同节点任务已运行"}, ensure_ascii=False))
+            return
         cfg = StrategyConfig()
-        store = ValidationStore()
+        store = ValidationStore(connection_timeout=1)
         trade_date = now.date().isoformat()
         try:
-            if args.slot != "1452":
-                payload = run_regular_slot(slot=args.slot, cfg=cfg, store=store)
+            if args.review:
+                payload = run_full_review(trade_date=trade_date, cfg=cfg, store=store)
+            elif args.slot != "1452":
+                payload = run_regular_slot(slot=args.slot, cfg=cfg, store=store, now_fn=datetime.now)
             else:
-                try:
-                    fast_payload = run_fast_final(
-                        trade_date=trade_date, cfg=cfg, store=store,
-                    )
-                except MarketDataError as exc:
-                    failed_at = datetime.now()
-                    telegram = notify_scan_issue(
-                        store=store, trade_date=trade_date, failed_slots=["1452"],
-                        reason=f"冻结决策版失败：{exc}", now=failed_at,
-                    )
-                    fast_payload = {
-                        "status": "failed", "reason": str(exc), "telegram": telegram,
-                    }
-                payload = {
-                    "status": "ok", "slot": "1452",
-                    "fast_decision": fast_payload,
-                    "full_review": run_full_review(
-                        trade_date=trade_date, cfg=cfg, store=store,
-                    ),
-                }
+                payload = run_strict_final(store=store, cfg=cfg, now_fn=datetime.now)
         except MarketDataError as exc:
             payload = {"status": "failed", "slot": args.slot, "reason": str(exc)}
             print(json.dumps(payload, ensure_ascii=False))
