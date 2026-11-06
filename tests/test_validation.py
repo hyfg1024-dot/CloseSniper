@@ -256,6 +256,16 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(row["validation_date"], "2026-08-25")
         self.assertAlmostEqual(row["return_1000"], 2.0)
 
+        class NoNetwork:
+            def minute_recent(self, code):
+                raise AssertionError("自动校验不应反复读取数月前的缺失分钟数据")
+
+        recent = validate_strict_three_stage_pending(
+            self.store, NoNetwork(), now=datetime(2026, 11, 6, 10, 30), include_history=False,
+        )
+        self.assertEqual(recent["pending"], 0)
+        self.assertEqual(recent["errors"], {})
+
     def test_1000_observation_only_captures_latest_live_strict_signal(self):
         candidate = {"code": "600001", "name": "严格测试", "price": 10.0, "score": 80.0}
         for slot, score in (("1430", 80.0), ("1445", 85.0), ("1452", 90.0)):

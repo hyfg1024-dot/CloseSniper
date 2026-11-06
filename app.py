@@ -26,6 +26,7 @@ from src.telegram_service import (
     send_message as send_telegram_message,
 )
 from src.validation_store import ValidationStore
+from src.activity_ui import render_activity_panel
 from src.validation_ui import render_history_page, render_validation_page
 from src.ai_observer import AIObserverSettings, load_settings as load_ai_settings, save_settings as save_ai_settings
 
@@ -263,6 +264,8 @@ def render_daily_result_panel(
     with container:
         st.markdown(f"#### {title} · 当日结果")
         st.caption(note)
+        if (scan_status or {}).get("error_message"):
+            st.warning(str(scan_status["error_message"])[:300])
         if frame.empty:
             status = (scan_status or {}).get("status")
             attempts = int((scan_status or {}).get("attempt_count") or 0)
@@ -345,7 +348,8 @@ def render_today_decision(
 ) -> None:
     """The first screen answers only: whether there is a primary signal and why."""
     strict_final = _three_stage_strict_frame(strict_frame)
-    completed = set(scan_status_frame["slot"].astype(str)) if not scan_status_frame.empty else set()
+    # A successful fast improved-flow scan is not the strict 14:52 review.
+    completed = set(strict_frame["slot"].astype(str)) if not strict_frame.empty else set()
     ready = {"1430", "1445", "1452"}.issubset(completed)
     st.markdown(
         """
@@ -488,7 +492,9 @@ def render_daily_timeline(
             completed = str(review_status.get("completed_at") or "")
             completed_text = completed[11:19] if len(completed) >= 19 else "—"
             with review_container:
-                st.caption(f"原架构完成时间：{completed_text}。仅供对照复核，不进入次日校验，也不覆盖准时版。")
+                if review_status.get("error_message"):
+                    st.warning(str(review_status["error_message"])[:300])
+                st.caption(f"实际完成时间：{completed_text}。严格结果用于补齐第三次筛选，三次均入选才进入严格次日校验；改进流程用于风险对照。")
                 left, right = st.columns(2)
                 with left:
                     st.markdown("#### 严格标准 · 完整重扫")
@@ -543,6 +549,7 @@ workspace = st.segmented_control(
     width="stretch",
 )
 validation_store = ValidationStore()
+render_activity_panel(validation_store, expanded=workspace in {"次日校验", "历史研究"})
 
 
 def optional_store_frame(store: ValidationStore, method_name: str, *args: str) -> pd.DataFrame:
@@ -596,7 +603,7 @@ if scan_mode is None:
             review_strict_frame=optional_store_frame(validation_store, "review_frame", today, "strict"),
             review_improved_frame=optional_store_frame(validation_store, "review_frame", today, "improved"),
         )
-    st.caption("14:52 准时结果用于决策；完整重扫仅作复核，不覆盖冻结记录。")
+    st.caption("严格标准三次均入选后进入次日校验；各节点的实际完成时间与延迟见扫描运行记录。")
     st.stop()
 
 scan_mode_label = "严格标准" if scan_mode == "strict" else "改进流程"

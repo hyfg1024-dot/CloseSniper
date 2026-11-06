@@ -7,8 +7,8 @@ from unittest.mock import patch
 import pandas as pd
 
 import auto_scan
-from src.data_source import AkshareSource, MarketDataError
-from src.scan_service import _cutoff_intraday, run_frozen_candidate_scan
+from src.data_source import AkshareSource, MarketDataError, demo_spot
+from src.scan_service import _cutoff_intraday, run_frozen_candidate_scan, run_market_scan
 from src.validation_store import ValidationStore
 
 
@@ -131,6 +131,38 @@ class ResilienceTests(unittest.TestCase):
             self.assertEqual(status["status"], "failed")
             self.assertEqual(status["attempt_count"], 4)
             self.assertIn("持续失败", status["error_message"])
+
+    def test_partial_data_errors_survive_success_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ValidationStore(Path(directory) / "scan.db")
+            partial_result = _ScanResult()
+            partial_result.errors = {"600001": "分时读取失败", "600002": "日线读取失败"}
+            with patch.object(auto_scan, "run_market_scan", return_value=partial_result):
+                auto_scan.run_scan_with_retries(
+                    cfg=auto_scan.StrategyConfig(), slot="1430", store=store,
+                    now_fn=lambda: datetime(2026, 11, 6, 14, 30),
+                )
+            status = store.scan_status_frame("2026-11-06").iloc[0]
+            self.assertEqual(status["status"], "success")
+            self.assertEqual(status["candidate_count"], 0)
+            self.assertIn("600001: 分时读取失败", status["error_message"])
+            self.assertIn("600002: 日线读取失败", status["error_message"])
+
+    def test_total_candidate_data_failure_never_becomes_clean_empty_result(self) -> None:
+        available = {"600001": pd.DataFrame({"close": [10.0]})}
+        unavailable = {"600001": "行情读取失败"}
+        for daily, minutes in (({}, available), (available, {}), ({}, {})):
+            with self.subTest(daily_missing=not daily, minutes_missing=not minutes):
+                with patch("src.scan_service.AkshareSource") as source_class, patch(
+                    "src.scan_service.parallel_fetch",
+                    side_effect=[(daily, unavailable if not daily else {}),
+                                 (minutes, unavailable if not minutes else {})],
+                ):
+                    source = source_class.return_value
+                    source.spot.return_value = demo_spot()
+                    with self.assertRaisesRegex(MarketDataError, "不能将缺失数据记为无符合条件股票"):
+                        run_market_scan(auto_scan.StrategyConfig(), now=datetime(2026, 11, 6, 14, 30))
+                    source.index_minute.assert_not_called()
 
     def test_fast_final_with_empty_1445_pool_finishes_without_market_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

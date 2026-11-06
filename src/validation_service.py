@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Any
 
 import pandas as pd
@@ -131,11 +131,16 @@ def validate_strict_three_stage_pending(
     store: ValidationStore,
     source: AkshareSource | None = None,
     now: datetime | None = None,
+    *,
+    include_history: bool = True,
 ) -> dict[str, Any]:
     """校验严格标准且14:30、14:45、14:52均入选的股票至10:00。"""
     now = now or datetime.now()
     source = source or AkshareSource()
     pending = store.pending_strict_final_signals(now.date().isoformat())
+    if not include_history:
+        cutoff = (now.date() - timedelta(days=14)).isoformat()
+        pending = [row for row in pending if str(row["validation_date"] or row["signal_date"]) >= cutoff]
     summary: dict[str, Any] = {"pending": len(pending), "completed": 0, "skipped": 0, "errors": {}}
     for signal in pending:
         code = str(signal["code"])

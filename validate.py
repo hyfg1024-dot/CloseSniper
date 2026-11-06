@@ -36,7 +36,7 @@ def main() -> None:
                 pass
     summary = {
         "improved": validate_pending(store, source),
-        "strict_three_stage": validate_strict_three_stage_pending(store, source),
+        "strict_three_stage": validate_strict_three_stage_pending(store, source, include_history=False),
         "strict_exit_observations": len(observations),
     }
     print(json.dumps(summary, ensure_ascii=False))

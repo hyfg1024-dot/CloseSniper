@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -45,7 +45,10 @@ def render_validation_page(store: ValidationStore) -> None:
         for row in pending_rows
     )
     early_window = time(9, 30) <= now.time() < time(9, 51)
-    strict_should_auto = bool(strict_pending) and now.time() >= time(10, 0)
+    recent_cutoff = (now.date() - timedelta(days=14)).isoformat()
+    strict_should_auto = now.time() >= time(10, 0) and any(
+        str(row["validation_date"] or row["signal_date"]) >= recent_cutoff for row in strict_pending
+    )
     if not early_window:
         early_label = "早盘获取窗口"
     elif now.time() < time(9, 45):
@@ -83,7 +86,7 @@ def render_validation_page(store: ValidationStore) -> None:
                         f"等待数据 {summary['skipped']} 只，异常 {len(summary['errors'])} 只"
                     )
                 if backfill or strict_should_auto:
-                    strict_summary = validate_strict_three_stage_pending(store, source, now)
+                    strict_summary = validate_strict_three_stage_pending(store, source, now, include_history=backfill)
                     status.write(
                         f"严格三次稳定 · 补齐开盘半小时 {strict_summary['completed']} 只，"
                         f"等待数据 {strict_summary['skipped']} 只，异常 {len(strict_summary['errors'])} 只"
@@ -267,8 +270,8 @@ def _render_strict_exit_observation(
             delta_color="off",
         )
     st.caption(
-        "当前把 10:00 设为观察点：它在现有严格三次稳定样本中与首分钟同为最高盈利概率，"
-        "且平均收益更高。它用于兑现／风控检查，不构成自动卖出指令；样本较少时只做记录。"
+        "10:00 是预先设定的观察点。以上统计随新样本更新；各时点缺失数据不同，样本数可能不同。"
+        "收益相对前日信号价，未扣交易费用，不能将曾经胜率最高理解为今后仍然最高。"
     )
 
     observed = store.strict_exit_observation_frame(trade_date)

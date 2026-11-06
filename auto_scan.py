@@ -87,6 +87,10 @@ def run_scan_with_retries(
                 provider=result.provider,
                 market_count=result.funnel.get("全市场"),
                 candidate_count=len(result.candidates),
+                error_message=(
+                    "部分个股数据不完整：" + "; ".join(f"{code}: {error}" for code, error in result.errors.items())
+                    if getattr(result, "errors", {}) else None
+                ),
             )
         return result, completed_at, attempt
     last_error = errors[-1] if errors else "未知行情错误"
@@ -305,6 +309,10 @@ def run_full_review(
         provider=result.provider, market_count=result.funnel["全市场"],
         hard_count=result.hard_count, strict_candidates=strict,
         improved_candidates=improved,
+        error_message=(
+            "部分个股数据不完整：" + "; ".join(f"{code}: {error}" for code, error in result.errors.items())
+            if result.errors else None
+        ),
     )
     store.save_strict_scan(
         slot="1452", scanned_at=completed_at, provider=result.provider,

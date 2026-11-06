@@ -227,6 +227,8 @@ def run_market_scan(
             }
         report(f"分时完成 {len(minute_map)}/{len(codes)}")
         errors = {**daily_errors, **minute_errors}
+        if codes and (not daily_map or not minute_map):
+            raise MarketDataError("候选日线或分时全部读取失败，不能将缺失数据记为无符合条件股票")
         index_minutes = (
             source.index_minute_fast(cutoff_at)
             if prefer_tencent and cutoff_at is not None

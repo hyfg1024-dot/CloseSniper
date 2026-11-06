@@ -431,11 +431,13 @@ class ValidationStore:
         hard_count: int,
         strict_candidates: Iterable[dict[str, Any]],
         improved_candidates: Iterable[dict[str, Any]],
+        error_message: str | None = None,
     ) -> None:
         self.record_review_run(
             trade_date=trade_date, status="success", started_at=started_at,
             completed_at=completed_at, provider=provider,
             market_count=market_count, hard_count=hard_count,
+            error_message=error_message,
         )
         strict_rows = list(strict_candidates)
         improved_rows = list(improved_candidates)
